@@ -109,7 +109,7 @@ def get_available_scopes_for_sub(df, sub_name):
 
 # --- USER INTERFACE ---
 st.set_page_config(page_title="RT Optimizer", layout="wide")
-st.title("🛡️ RT Optimizer")
+st.title("🧑‍🏭 RT Optimizer")
 
 # 1. SIDEBAR
 st.sidebar.header("⚙️ Configuration")
