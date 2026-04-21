@@ -16,6 +16,8 @@ class RTOptimizerEngine:
         df['Dateofweld'] = pd.to_datetime(df['Dateofweld'], dayfirst=True, errors='coerce')
         df['RTDate1'] = pd.to_datetime(df['RTDate1'], dayfirst=True, errors='coerce')
         df['RT_Perc'] = pd.to_numeric(df['RT_Perc'], errors='coerce')
+        
+        # Fallback implementation
         df['RT_Perc'] = df['RT_Perc'].fillna(self.fallback_rt_perc * 100)
         
         # 2. Location Mapping
@@ -95,11 +97,9 @@ class RTOptimizerEngine:
 
 # --- UTILS ---
 def get_available_scopes_for_sub(df, sub_name):
-    """Checks which scopes are actually present for a specific subcontractor."""
     ws_vals = ["YWS", "S", "WS"]
     fw_vals = ["YFW", "FW", "F"]
     pl_vals = ["PL"]
-    
     sub_locs = df[df['Subc'] == sub_name]['location'].unique()
     available = []
     if any(loc in sub_locs for loc in ws_vals): available.append("WS")
@@ -111,8 +111,8 @@ def get_available_scopes_for_sub(df, sub_name):
 st.set_page_config(page_title="RT Optimizer", layout="wide")
 st.title("🧑‍🏭 RT Optimizer")
 
-# 1. SIDEBAR
-st.sidebar.header("⚙️ Configuration")
+# 1. SIDEBAR CONFIGURATION
+st.sidebar.header(":material/settings: Configuration")
 
 uploaded_file = st.file_uploader("Upload Daily SQL Extraction (CSV)", type="csv")
 
@@ -123,11 +123,9 @@ if uploaded_file:
         df_input[col] = df_input[col].astype(str).str.strip()
 
     if 'Subc' in df_input.columns and 'location' in df_input.columns:
-        # SELECT SUBCONTRACTOR FIRST
         subs_list = sorted(df_input['Subc'].unique())
         selected_sub = st.sidebar.selectbox("🎯 Target Subcontractor:", options=subs_list)
         
-        # DYNAMIC LOCATION SCOPE
         available_scopes = get_available_scopes_for_sub(df_input, selected_sub)
         if available_scopes:
             location_scope = st.sidebar.radio(
@@ -142,16 +140,28 @@ if uploaded_file:
         st.error("CSV must contain 'Subc' and 'location' columns.")
         st.stop()
 
-    days_per_lot = st.sidebar.number_input("Days per Window", min_value=1, value=14)
-    fallback_percentage = st.sidebar.slider("Fallback RT %", 0, 100, 10)
+    days_per_lot = st.sidebar.number_input(
+        "Days per Window", 
+        min_value=1, 
+        value=14,
+        help="Maximum time period allowed for a lot to remain open according to ASME B31.3."
+    )
+    
+    fallback_percentage = st.sidebar.slider(
+        "Fallback RT %", 
+        0, 100, 10,
+        help="This percentage is used ONLY if a joint in the CSV has an empty 'RT_Perc' cell. It acts as a safety default value."
+    )
+    st.sidebar.caption("⚠️ *Fallback applies only to missing data in source file.*")
 
     st.sidebar.divider()
     st.sidebar.subheader("Lot Identity Factors")
+    st.sidebar.info("Select variables that define a unique Designated Lot:")
     c_subc = st.sidebar.checkbox("Subcontractor (Subc)", value=True)
-    c_welder = st.sidebar.checkbox("Welder ID", value=True)
-    c_material = st.sidebar.checkbox("Material", value=True)
-    c_process = st.sidebar.checkbox("Process", value=True)
-    c_line = st.sidebar.checkbox("Line ID", value=False)
+    c_welder = st.sidebar.checkbox("Welder ID (Welder1)", value=True)
+    c_material = st.sidebar.checkbox("Material Type (MaterialType)", value=True)
+    c_process = st.sidebar.checkbox("Welding Process (WPS.1.Description)", value=True)
+    c_line = st.sidebar.checkbox("Line ID (Line)", value=False)
 
     db_criteria_map = []
     if c_subc: db_criteria_map.append('Subc')
@@ -164,64 +174,82 @@ if uploaded_file:
     engine = RTOptimizerEngine(fallback_percentage/100, days_per_lot, db_criteria_map, location_scope)
     audit_df, df_with_lots = engine.get_lot_audit(df_input)
 
-    tab1, tab2 = st.tabs(["📋 Work Order Generator", "📊 Dashboard & Lot Explorer"])
+    if audit_df.empty:
+        st.warning(f"⚠️ No juntas found for scope '{location_scope}' with current parameters.")
+    else:
+        tab1, tab2 = st.tabs(["📋 Work Order Generator", "📊 Dashboard & Lot Explorer"])
 
-    with tab1:
-        st.subheader(f"Inspection Plan: {selected_sub} | Scope: {location_scope}")
-        
-        # Filter data for the engine based on sub and the already filtered scope inside the engine
-        sub_df_lots = df_with_lots[df_with_lots['Subc'] == selected_sub]
-        sub_audit = audit_df[audit_df['Subcontractor'] == selected_sub]
-        
-        if st.button(f"🚀 Generate Inspection Plan"):
-            with st.spinner('Calculating synergies...'):
-                result = engine.execute_optimization(sub_df_lots, sub_audit.copy())
-                if not result.empty:
-                    st.write(f"Recommended Inspections: **{len(result)}**")
-                    display_cols = ['Joint_ID', 'Subc', 'Welder1', 'Line', 'location', 'MaterialType', 'WPS.1.Description', 'Dateofweld', 'RT_Perc']
-                    st.dataframe(result[[c for c in display_cols if c in result.columns]], use_container_width=True, hide_index=True)
-                    csv_data = result.to_csv(sep=';', index=False).encode('utf-8-sig')
-                    st.download_button("📥 Download Plan (CSV)", csv_data, f"plan_{selected_sub}_{location_scope}.csv", "text/csv")
-                else:
-                    st.success("✅ Compliance achieved for this scope.")
+        with tab1:
+            st.subheader(f"Inspection Plan: {selected_sub} | Scope: {location_scope}")
+            sub_df_lots = df_with_lots[df_with_lots['Subc'] == selected_sub]
+            sub_audit = audit_df[audit_df['Subcontractor'] == selected_sub]
+            
+            if st.button(f"🚀 Generate Inspection Plan"):
+                with st.spinner('Calculating synergies...'):
+                    result = engine.execute_optimization(sub_df_lots, sub_audit.copy())
+                    if not result.empty:
+                        st.write(f"Recommended Inspections: **{len(result)}**")
+                        display_cols = ['Joint_ID', 'Subc', 'Welder1', 'Line', 'location', 'MaterialType', 'WPS.1.Description', 'Dateofweld', 'RT_Perc']
+                        st.dataframe(result[[c for c in display_cols if c in result.columns]], use_container_width=True, hide_index=True)
+                        csv_data = result.to_csv(sep=';', index=False).encode('utf-8-sig')
+                        st.download_button("📥 Download Plan (CSV)", csv_data, f"plan_{selected_sub}_{location_scope}.csv", "text/csv")
+                    else:
+                        st.success("✅ Compliance achieved for this scope.")
 
-    with tab2:
-        view_option = st.selectbox("📊 Dashboard View Scope:", options=["ALL"] + subs_list, index=subs_list.index(selected_sub)+1 if selected_sub in subs_list else 0)
-        
-        dash_audit = audit_df.copy() if view_option == "ALL" else audit_df[audit_df['Subcontractor'] == view_option]
-        
-        k1, k2, k3, k4 = st.columns(4)
-        total_l = len(dash_audit)
-        open_l = len(dash_audit[dash_audit['Status'] == '🔴 OPEN'])
-        k1.metric("Total Lots", total_l)
-        k2.metric("Open Lots", open_l)
-        k3.metric("Closed Lots", total_l - open_l)
-        k4.metric("Compliance", f"{((total_l - open_l)/total_l)*100:.1f}%" if total_l > 0 else "0%")
+        with tab2:
+            view_option = st.selectbox("📊 Dashboard View Scope:", options=["ALL"] + subs_list, index=subs_list.index(selected_sub)+1 if selected_sub in subs_list else 0)
+            dash_audit = audit_df.copy() if view_option == "ALL" else audit_df[audit_df['Subcontractor'] == view_option]
+            
+            k1, k2, k3, k4 = st.columns(4)
+            total_l = len(dash_audit)
+            open_l = len(dash_audit[dash_audit['Status'] == '🔴 OPEN'])
+            k1.metric("Total Lots", total_l)
+            k2.metric("Open Lots", open_l)
+            k3.metric("Closed Lots", total_l - open_l)
+            k4.metric("Compliance", f"{((total_l - open_l)/total_l)*100:.1f}%" if total_l > 0 else "0%")
 
-        st.divider()
-        f1, f2, f3, f4 = st.columns(4)
-        with f1: s_welders = st.multiselect("Filter Welder", options=sorted(dash_audit['Welder'].unique()))
-        with f2: s_materials = st.multiselect("Filter Material", options=sorted(dash_audit['Material'].unique()))
-        with f3: s_processes = st.multiselect("Filter Process", options=sorted(dash_audit['Process'].unique()))
-        with f4: s_status = st.multiselect("Filter Status", options=['🔴 OPEN', '🟢 CLOSED'])
+            st.divider()
+            f1, f2, f3, f4 = st.columns(4)
+            with f1: s_welders = st.multiselect("Filter Welder", options=sorted(dash_audit['Welder'].unique()))
+            with f2: s_materials = st.multiselect("Filter Material", options=sorted(dash_audit['Material'].unique()))
+            with f3: s_processes = st.multiselect("Filter Process", options=sorted(dash_audit['Process'].unique()))
+            with f4: s_status = st.multiselect("Filter Status", options=['🔴 OPEN', '🟢 CLOSED'])
 
-        filtered_audit = dash_audit.copy()
-        if s_welders: filtered_audit = filtered_audit[filtered_audit['Welder'].isin(s_welders)]
-        if s_materials: filtered_audit = filtered_audit[filtered_audit['Material'].isin(s_materials)]
-        if s_processes: filtered_audit = filtered_audit[filtered_audit['Process'].isin(s_processes)]
-        if s_status: filtered_audit = filtered_audit[filtered_audit['Status'].isin(s_status)]
+            filtered_audit = dash_audit.copy()
+            if s_welders: filtered_audit = filtered_audit[filtered_audit['Welder'].isin(s_welders)]
+            if s_materials: filtered_audit = filtered_audit[filtered_audit['Material'].isin(s_materials)]
+            if s_processes: filtered_audit = filtered_audit[filtered_audit['Process'].isin(s_processes)]
+            if s_status: filtered_audit = filtered_audit[filtered_audit['Status'].isin(s_status)]
 
-        selection_event = st.dataframe(filtered_audit, use_container_width=True, on_select="rerun", selection_mode="single-row", hide_index=True)
+            selection_event = st.dataframe(filtered_audit, use_container_width=True, on_select="rerun", selection_mode="single-row", hide_index=True)
 
-        if selection_event.selection.rows:
-            row_idx = selection_event.selection.rows[0]
-            selected_lot_data = filtered_audit.iloc[row_idx]
-            lot_id = selected_lot_data['Lot_ID']
-            st.markdown(f"### 🔍 Detailed Explorer: Lot `{lot_id}`")
-            joints_in_lot = df_with_lots[df_with_lots['Lot_ID'] == lot_id]
-            st.dataframe(joints_in_lot[['Joint_ID', 'Subc', 'Welder1', 'Line', 'Dateofweld', 'RTDate1', 'RT_Perc']], use_container_width=True, hide_index=True)
-        else:
-            st.caption("💡 Click on a row above to see individual joints.")
+            if selection_event.selection.rows:
+                row_idx = selection_event.selection.rows[0]
+                selected_lot_data = filtered_audit.iloc[row_idx]
+                lot_id = selected_lot_data['Lot_ID']
+                st.markdown(f"### 🔍 Detailed Explorer: Lot `{lot_id}`")
+                joints_in_lot = df_with_lots[df_with_lots['Lot_ID'] == lot_id]
+                st.dataframe(joints_in_lot[['Joint_ID', 'Subc', 'Welder1', 'Line', 'Dateofweld', 'RTDate1', 'RT_Perc']], use_container_width=True, hide_index=True)
+            else:
+                st.caption("💡 Click on a row above to see individual joints.")
 
 else:
-    st.info("💡 Please upload your SQL CSV extraction to begin.")
+    # --- PANTALLA INICIAL: REQUISITOS DEL CSV ---
+    st.info("💡 **Awaiting Data.** Please upload your SQL CSV extraction to begin.")
+    
+    st.markdown("### Required CSV Data Structure")
+    st.markdown("To ensure the engine works correctly, your file **must** include these exact columns:")
+    
+    # Tabla de ejemplo con los nombres reales
+    example_schema = {
+        'Column Name': ['Joint_ID', 'Subc', 'Welder1', 'Line', 'location', 'MaterialType', 'WPS.1.Description', 'Dateofweld', 'RTDate1', 'RT_Perc'],
+        'Description': ['Unique ID', 'Subcontractor Name', 'Welder ID', 'Line Number', 'WS, YWS, FW, etc.', 'Material Group', 'Welding Process', 'DD/MM/YYYY', 'Empty if pending', 'Target % (5, 10, 100)']
+    }
+    st.table(pd.DataFrame(example_schema))
+    
+    st.markdown("""
+    **Format Specs:**
+    *   **Separator:** Semicolon (`;`)
+    *   **Date Format:** Day/Month/Year (e.g., 31/12/2024)
+    *   **Scope Rules:** Juntas with `RT_Perc` = 0 or 100 are automatically excluded from lot calculations.
+    """)
