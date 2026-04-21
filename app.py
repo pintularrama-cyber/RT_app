@@ -17,17 +17,18 @@ class RTOptimizerEngine:
         df['RTDate1'] = pd.to_datetime(df['RTDate1'], dayfirst=True, errors='coerce')
         df['RT_Perc'] = pd.to_numeric(df['RT_Perc'], errors='coerce')
         
-        # Fallback implementation
-        df['RT_Perc'] = df['RT_Perc'].fillna(self.fallback_rt_perc * 100)
+        # --- LÓGICA DE FALLBACK CORREGIDA ---
+        # Tratamos el 0 y el Nulo como "información faltante" y aplicamos el Fallback
+        df['RT_Perc'] = df['RT_Perc'].replace(0, np.nan).fillna(self.fallback_rt_perc * 100)
         
         # 2. Location Mapping
         location_map = {"WS": ["YWS", "S", "WS"], "FW": ["YFW", "FW", "F"], "PL": ["PL"]}
         allowed_values = location_map.get(self.scope, [])
         
-        # Filter by Scope and Sampling Rules (Ignore 0% and 100%)
+        # Filtramos por Scope y solo quitamos las de 100% (Las de 0% ahora tienen el Fallback)
         df_filtered = df[
             (df['location'].isin(allowed_values)) & 
-            (df['RT_Perc'] > 0) & (df['RT_Perc'] < 100)
+            (df['RT_Perc'] < 100)
         ].copy()
         
         if df_filtered.empty: return pd.DataFrame(), pd.DataFrame()
@@ -109,9 +110,9 @@ def get_available_scopes_for_sub(df, sub_name):
 
 # --- USER INTERFACE ---
 st.set_page_config(page_title="RT Optimizer", layout="wide")
-st.title("🧑‍🏭 RT Optimizer")
+st.title(":material/engineering: RT Optimizer")
 
-# 1. SIDEBAR CONFIGURATION
+# 1. SIDEBAR
 st.sidebar.header(":material/settings: Configuration")
 
 uploaded_file = st.file_uploader("Upload Daily SQL Extraction (CSV)", type="csv")
@@ -142,21 +143,19 @@ if uploaded_file:
 
     days_per_lot = st.sidebar.number_input(
         "Days per Window", 
-        min_value=1, 
-        value=14,
+        min_value=1, value=14,
         help="Maximum time period allowed for a lot to remain open according to ASME B31.3."
     )
     
     fallback_percentage = st.sidebar.slider(
         "Fallback RT %", 
         0, 100, 10,
-        help="This percentage is used ONLY if a joint in the CSV has an empty 'RT_Perc' cell. It acts as a safety default value."
+        help="This value is applied if 'RT_Perc' is empty OR 0 in the CSV file."
     )
-    st.sidebar.caption("⚠️ *Fallback applies only to missing data in source file.*")
+    st.sidebar.caption("⚠️ *Fallback acts as a default for uninitialized data (0 or Null).*")
 
     st.sidebar.divider()
     st.sidebar.subheader("Lot Identity Factors")
-    st.sidebar.info("Select variables that define a unique Designated Lot:")
     c_subc = st.sidebar.checkbox("Subcontractor (Subc)", value=True)
     c_welder = st.sidebar.checkbox("Welder ID (Welder1)", value=True)
     c_material = st.sidebar.checkbox("Material Type (MaterialType)", value=True)
@@ -170,12 +169,11 @@ if uploaded_file:
     if c_process: db_criteria_map.append('WPS.1.Description')
     if c_line: db_criteria_map.append('Line')
 
-    # INITIALIZE ENGINE
     engine = RTOptimizerEngine(fallback_percentage/100, days_per_lot, db_criteria_map, location_scope)
     audit_df, df_with_lots = engine.get_lot_audit(df_input)
 
     if audit_df.empty:
-        st.warning(f"⚠️ No juntas found for scope '{location_scope}' with current parameters.")
+        st.warning(f"⚠️ No joints found for scope '{location_scope}' (All are 100% or excluded).")
     else:
         tab1, tab2 = st.tabs(["📋 Work Order Generator", "📊 Dashboard & Lot Explorer"])
 
@@ -185,7 +183,7 @@ if uploaded_file:
             sub_audit = audit_df[audit_df['Subcontractor'] == selected_sub]
             
             if st.button(f"🚀 Generate Inspection Plan"):
-                with st.spinner('Calculating synergies...'):
+                with st.spinner('Optimizing synergies...'):
                     result = engine.execute_optimization(sub_df_lots, sub_audit.copy())
                     if not result.empty:
                         st.write(f"Recommended Inspections: **{len(result)}**")
@@ -197,11 +195,8 @@ if uploaded_file:
                         st.success("✅ Compliance achieved for this scope.")
 
         with tab2:
-            view_option = st.selectbox("📊 Dashboard View Scope:", options=["ALL"] + subs_list, index=subs_list.index(selected_sub)+1 if selected_sub in subs_list else 0)
-            dash_audit = audit_df.copy() if view_option == "ALL" else audit_df[audit_df['Subcontractor'] == view_option]
-            
             k1, k2, k3, k4 = st.columns(4)
-            total_l = len(dash_audit)
+            total_l = len(dash_audit := (audit_df.copy() if (view_option := st.selectbox("📊 Dashboard View Scope:", options=["ALL"] + subs_list, index=subs_list.index(selected_sub)+1)) == "ALL" else audit_df[audit_df['Subcontractor'] == view_option]))
             open_l = len(dash_audit[dash_audit['Status'] == '🔴 OPEN'])
             k1.metric("Total Lots", total_l)
             k2.metric("Open Lots", open_l)
@@ -234,22 +229,15 @@ if uploaded_file:
                 st.caption("💡 Click on a row above to see individual joints.")
 
 else:
-    # --- PANTALLA INICIAL: REQUISITOS DEL CSV ---
     st.info("💡 **Awaiting Data.** Please upload your SQL CSV extraction to begin.")
-    
     st.markdown("### Required CSV Data Structure")
-    st.markdown("To ensure the engine works correctly, your file **must** include these exact columns:")
-    
-    # Tabla de ejemplo con los nombres reales
     example_schema = {
         'Column Name': ['Joint_ID', 'Subc', 'Welder1', 'Line', 'location', 'MaterialType', 'WPS.1.Description', 'Dateofweld', 'RTDate1', 'RT_Perc'],
-        'Description': ['Unique ID', 'Subcontractor Name', 'Welder ID', 'Line Number', 'WS, YWS, FW, etc.', 'Material Group', 'Welding Process', 'DD/MM/YYYY', 'Empty if pending', 'Target % (5, 10, 100)']
+        'Description': ['Unique ID', 'Subcontractor', 'Welder ID', 'Line Number', 'Location Type', 'Material Group', 'Welding Process', 'DD/MM/YYYY', 'Empty if pending', 'Target % (5, 10, 100)']
     }
     st.table(pd.DataFrame(example_schema))
-    
     st.markdown("""
-    **Format Specs:**
-    *   **Separator:** Semicolon (`;`)
-    *   **Date Format:** Day/Month/Year (e.g., 31/12/2024)
-    *   **Scope Rules:** Juntas with `RT_Perc` = 0 or 100 are automatically excluded from lot calculations.
+    **Scope Rules:**
+    *   `RT_Perc` = 100: Mandatory inspections (automatically excluded from lot sampling).
+    *   `RT_Perc` = 0 or Null: Missing info. **Fallback RT %** value from sidebar will be applied.
     """)
