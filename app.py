@@ -173,7 +173,7 @@ if uploaded_file:
         sub_df_lots = df_with_lots[df_with_lots['Subc'] == selected_sub]
         sub_audit = audit_df[audit_df['Subcontractor'] == selected_sub]
         
-        if st.button(f"🚀 Generate Plan"):
+        if st.button(f"🚀 Generate Inspection Plan"):
             with st.spinner('Calculating synergies...'):
                 result = engine.execute_optimization(sub_df_lots, sub_audit.copy())
                 if not result.empty:
