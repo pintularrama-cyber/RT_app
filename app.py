@@ -5,25 +5,42 @@ from datetime import datetime
 
 # --- OPTIMIZATION ENGINE ---
 class RTOptimizerEngine:
-    def __init__(self, fallback_rt_perc, window_days, lot_criteria):
+    def __init__(self, fallback_rt_perc, window_days, lot_criteria, selected_location_scope):
         self.fallback_rt_perc = fallback_rt_perc
         self.window_days = window_days
         self.lot_criteria = lot_criteria 
+        self.scope = selected_location_scope
 
     def get_lot_audit(self, df):
+        # 1. Sanitization
         df['Dateofweld'] = pd.to_datetime(df['Dateofweld'], dayfirst=True, errors='coerce')
         df['RTDate1'] = pd.to_datetime(df['RTDate1'], dayfirst=True, errors='coerce')
         df['RT_Perc'] = pd.to_numeric(df['RT_Perc'], errors='coerce')
-        
-        # Aplicación del Fallback: si la celda está vacía, usa el valor del slider
         df['RT_Perc'] = df['RT_Perc'].fillna(self.fallback_rt_perc * 100)
         
-        df_filtered = df[(df['RT_Perc'] > 0) & (df['RT_Perc'] < 100)].copy()
-        if df_filtered.empty: return pd.DataFrame(), pd.DataFrame()
+        # 2. Location Filtering Logic
+        location_map = {
+            "WS": ["YWS", "S", "WS"],
+            "FW": ["YFW", "FW", "F"],
+            "PL": ["PL"]
+        }
+        allowed_values = location_map.get(self.scope, [])
+        
+        # Filter by selected scope and remove 0% or 100%
+        df_filtered = df[
+            (df['location'].isin(allowed_values)) & 
+            (df['RT_Perc'] > 0) & 
+            (df['RT_Perc'] < 100)
+        ].copy()
+        
+        if df_filtered.empty:
+            return pd.DataFrame(), pd.DataFrame()
 
+        # 3. Time Block Creation
         start_date = df_filtered['Dateofweld'].min()
         df_filtered['Block_ID'] = ((df_filtered['Dateofweld'] - start_date).dt.days // self.window_days).fillna(-1).astype(int)
         
+        # 4. Dynamic Lot ID Building
         def build_lot_id(row):
             parts = [str(row['Block_ID'])]
             for criterion in self.lot_criteria:
@@ -33,6 +50,7 @@ class RTOptimizerEngine:
         df_audit_base = df_filtered[df_filtered['Block_ID'] >= 0].copy()
         df_audit_base['Lot_ID'] = df_audit_base.apply(build_lot_id, axis=1)
 
+        # 5. Audit Summary Grouping
         audit = df_audit_base.groupby('Lot_ID').agg(
             Total_Joints=('Joint_ID', 'count'), 
             Current_RT_Done=('RTDate1', 'count'),
@@ -82,31 +100,25 @@ class RTOptimizerEngine:
 
 # --- USER INTERFACE ---
 st.set_page_config(page_title="RT Optimizer", layout="wide")
-st.title("🛡️ RT Optimizer") # Nombre actualizado
+st.title("🛡️ RT Optimizer")
 
-# 1. SIDEBAR CON EXPLICACIONES
+# 1. SIDEBAR
 st.sidebar.header("⚙️ Configuration")
 
-# Explicación de Window
-days_per_lot = st.sidebar.number_input(
-    "Days per Window", 
-    min_value=1, 
-    value=14,
-    help="Maximum time period allowed for a lot to remain open according to ASME B31.3."
+# SELECTOR DE UBICACIÓN (Location Scope)
+location_scope = st.sidebar.radio(
+    "Select Location Scope:",
+    options=["WS", "FW", "PL"],
+    help="WS: Workshop (YWS, S, WS) | FW: Field (YFW, FW, F) | PL: Pipeline (PL). All other locations will be ignored."
 )
-
-# Explicación de Fallback (Tu petición)
-fallback_percentage = st.sidebar.slider(
-    "Fallback RT Requirement %", 
-    0, 100, 10,
-    help="This percentage is used ONLY if a joint in the CSV has an empty 'RT_Perc' cell. It acts as a safety default value."
-)
-st.sidebar.caption("⚠️ *The fallback is only applied to missing data in the source file.*")
 
 st.sidebar.divider()
 
+days_per_lot = st.sidebar.number_input("Days per Window", min_value=1, value=14)
+fallback_percentage = st.sidebar.slider("Fallback RT Req. %", 0, 100, 10)
+
+st.sidebar.divider()
 st.sidebar.subheader("Lot Identity Factors")
-st.sidebar.info("Select the variables that define a unique Designated Lot:")
 c_welder = st.sidebar.checkbox("Welder ID", value=True)
 c_material = st.sidebar.checkbox("Material Type", value=True)
 c_process = st.sidebar.checkbox("Welding Process", value=True)
@@ -127,68 +139,74 @@ if uploaded_file:
     for col in df_input.select_dtypes(['object']).columns:
         df_input[col] = df_input[col].astype(str).str.strip()
 
-    engine = RTOptimizerEngine(fallback_percentage/100, days_per_lot, db_criteria_map)
-    audit_df, df_with_lots = engine.get_lot_audit(df_input)
-
-    if audit_df.empty:
-        st.warning("⚠️ No random sampling lots found (all joints are 0% or 100%).")
+    required_cols = ['Joint_ID', 'Welder1', 'location', 'MaterialType', 'WPS.1.Description', 'Dateofweld', 'RTDate1', 'RT_Perc']
+    missing = [c for c in required_cols if c not in df_input.columns]
+    
+    if missing:
+        st.error(f"❌ Columns missing in CSV: {missing}")
     else:
-        tab1, tab2 = st.tabs(["📋 Work Order Generator", "📊 Dashboard & Lot Explorer"])
+        engine = RTOptimizerEngine(fallback_percentage/100, days_per_lot, db_criteria_map, location_scope)
+        audit_df, df_with_lots = engine.get_lot_audit(df_input)
 
-        with tab1:
-            st.subheader("Plan Optimization")
-            if st.button("🚀 Calculate Optimized Plan"):
-                result = engine.execute_optimization(df_with_lots, audit_df.copy())
-                if not result.empty:
-                    st.write(f"Recommended Inspections: **{len(result)}**")
-                    display_cols = ['Joint_ID', 'Welder1', 'Line', 'MaterialType', 'WPS.1.Description', 'Dateofweld', 'RT_Perc']
-                    actual_display = [c for c in display_cols if c in result.columns]
-                    st.dataframe(result[actual_display], use_container_width=True)
-                    csv_data = result.to_csv(sep=';', index=False).encode('utf-8-sig')
-                    st.download_button("📥 Download Plan (CSV)", csv_data, "work_order.csv", "text/csv")
+        if audit_df.empty:
+            st.warning(f"⚠️ No juntas found for the scope '{location_scope}' with the current parameters.")
+        else:
+            st.info(f"📍 Currently processing **{location_scope}** scope.")
+            tab1, tab2 = st.tabs(["📋 Work Order Generator", "📊 Dashboard & Lot Explorer"])
+
+            with tab1:
+                st.subheader("Plan Optimization")
+                if st.button("🚀 Calculate Optimized Plan"):
+                    result = engine.execute_optimization(df_with_lots, audit_df.copy())
+                    if not result.empty:
+                        st.write(f"Recommended Inspections: **{len(result)}**")
+                        display_cols = ['Joint_ID', 'Welder1', 'Line', 'location', 'MaterialType', 'WPS.1.Description', 'Dateofweld', 'RT_Perc']
+                        actual_display = [c for c in display_cols if c in result.columns]
+                        st.dataframe(result[actual_display], use_container_width=True, hide_index=True)
+                        csv_data = result.to_csv(sep=';', index=False).encode('utf-8-sig')
+                        st.download_button("📥 Download Plan (CSV)", csv_data, f"work_order_{location_scope}.csv", "text/csv")
+                    else:
+                        st.success("✅ Compliance achieved.")
+
+            with tab2:
+                k1, k2, k3, k4 = st.columns(4)
+                total_l = len(audit_df)
+                open_l = len(audit_df[audit_df['Status'] == '🔴 OPEN'])
+                k1.metric("Total Lots", total_l)
+                k2.metric("Open Lots", open_l)
+                k3.metric("Closed Lots", total_l - open_l)
+                k4.metric("Compliance", f"{((total_l - open_l)/total_l)*100:.1f}%")
+
+                st.divider()
+                f1, f2, f3, f4 = st.columns(4)
+                with f1: s_welders = st.multiselect("Welder", options=sorted(audit_df['Welder'].unique()))
+                with f2: s_materials = st.multiselect("Material", options=sorted(audit_df['Material'].unique()))
+                with f3: s_processes = st.multiselect("Process", options=sorted(audit_df['Process'].unique()))
+                with f4: s_status = st.multiselect("Status", options=['🔴 OPEN', '🟢 CLOSED'])
+
+                filtered_audit = audit_df.copy()
+                if s_welders: filtered_audit = filtered_audit[filtered_audit['Welder'].isin(s_welders)]
+                if s_materials: filtered_audit = filtered_audit[filtered_audit['Material'].isin(s_materials)]
+                if s_processes: filtered_audit = filtered_audit[filtered_audit['Process'].isin(s_processes)]
+                if s_status: filtered_audit = filtered_audit[filtered_audit['Status'].isin(s_status)]
+
+                selection_event = st.dataframe(filtered_audit, use_container_width=True, on_select="rerun", selection_mode="single-row", hide_index=True)
+
+                if selection_event.selection.rows:
+                    row_idx = selection_event.selection.rows[0]
+                    selected_lot_data = filtered_audit.iloc[row_idx]
+                    lot_id = selected_lot_data['Lot_ID']
+                    st.markdown(f"### 🔍 Detailed Explorer: Lot `{lot_id}`")
+                    det_c1, det_c2, det_c3, det_c4 = st.columns(4)
+                    det_c1.write(f"**Welder:** {selected_lot_data['Welder']}")
+                    det_c2.write(f"**Material:** {selected_lot_data['Material']}")
+                    det_c3.write(f"**Process:** {selected_lot_data['Process']}")
+                    det_c4.write(f"**Status:** {selected_lot_data['Status']}")
+                    st.info(f"Progress: {selected_lot_data['Current_RT_Done']} of {selected_lot_data['Required']} RTs done ({selected_lot_data['Current_RT_Done_%']}%)")
+                    joints_in_lot = df_with_lots[df_with_lots['Lot_ID'] == lot_id]
+                    st.dataframe(joints_in_lot[['Joint_ID', 'Line', 'location', 'Dateofweld', 'RTDate1', 'RT_Perc']], use_container_width=True, hide_index=True)
                 else:
-                    st.success("✅ Everything is in compliance.")
-
-        with tab2:
-            k1, k2, k3, k4 = st.columns(4)
-            total_l = len(audit_df)
-            open_l = len(audit_df[audit_df['Status'] == '🔴 OPEN'])
-            k1.metric("Total Lots", total_l)
-            k2.metric("Open Lots", open_l)
-            k3.metric("Closed Lots", total_l - open_l)
-            k4.metric("Compliance", f"{((total_l - open_l)/total_l)*100:.1f}%")
-
-            st.divider()
-            st.subheader("🔍 Filter Summary Table")
-            f1, f2, f3, f4 = st.columns(4)
-            with f1: s_welders = st.multiselect("Welder", options=sorted(audit_df['Welder'].unique()))
-            with f2: s_materials = st.multiselect("Material", options=sorted(audit_df['Material'].unique()))
-            with f3: s_processes = st.multiselect("Process", options=sorted(audit_df['Process'].unique()))
-            with f4: s_status = st.multiselect("Status", options=['🔴 OPEN', '🟢 CLOSED'])
-
-            filtered_audit = audit_df.copy()
-            if s_welders: filtered_audit = filtered_audit[filtered_audit['Welder'].isin(s_welders)]
-            if s_materials: filtered_audit = filtered_audit[filtered_audit['Material'].isin(s_materials)]
-            if s_processes: filtered_audit = filtered_audit[filtered_audit['Process'].isin(s_processes)]
-            if s_status: filtered_audit = filtered_audit[filtered_audit['Status'].isin(s_status)]
-
-            selection_event = st.dataframe(filtered_audit, use_container_width=True, on_select="rerun", selection_mode="single-row", hide_index=True)
-
-            if selection_event.selection.rows:
-                row_idx = selection_event.selection.rows[0]
-                selected_lot_data = filtered_audit.iloc[row_idx]
-                lot_id = selected_lot_data['Lot_ID']
-                st.markdown(f"### 🔍 Detailed Explorer: Lot `{lot_id}`")
-                det_c1, det_c2, det_c3, det_c4 = st.columns(4)
-                det_c1.write(f"**Welder:** {selected_lot_data['Welder']}")
-                det_c2.write(f"**Material:** {selected_lot_data['Material']}")
-                det_c3.write(f"**Process:** {selected_lot_data['Process']}")
-                det_c4.write(f"**Status:** {selected_lot_data['Status']}")
-                st.info(f"Progress: {selected_lot_data['Current_RT_Done']} of {selected_lot_data['Required']} RTs done ({selected_lot_data['Current_RT_Done_%']}%)")
-                joints_in_lot = df_with_lots[df_with_lots['Lot_ID'] == lot_id]
-                st.dataframe(joints_in_lot[['Joint_ID', 'Line', 'Dateofweld', 'RTDate1', 'RT_Perc']], use_container_width=True, hide_index=True)
-            else:
-                st.caption("💡 Click on any row above to see individual joints.")
+                    st.caption("💡 Select a row to explore details.")
 
 else:
     st.info("💡 Please upload your SQL CSV extraction to begin.")
