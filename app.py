@@ -144,7 +144,7 @@ if uploaded_file:
     days_per_lot = st.sidebar.number_input(
         "Days per Window", 
         min_value=1, value=14,
-        help="Maximum time period allowed for a lot to remain open according to ASME B31.3."
+        help="Period of time which defines a Block"
     )
     
     fallback_percentage = st.sidebar.slider(
@@ -156,11 +156,11 @@ if uploaded_file:
 
     st.sidebar.divider()
     st.sidebar.subheader("Lot Identity Factors")
-    c_subc = st.sidebar.checkbox("Subcontractor (Subc)", value=True)
-    c_welder = st.sidebar.checkbox("Welder ID (Welder1)", value=True)
-    c_material = st.sidebar.checkbox("Material Type (MaterialType)", value=True)
-    c_process = st.sidebar.checkbox("Welding Process (WPS.1.Description)", value=True)
-    c_line = st.sidebar.checkbox("Line ID (Line)", value=False)
+    c_subc = st.sidebar.checkbox("Subcontractor", value=True)
+    c_welder = st.sidebar.checkbox("Welder ID", value=True)
+    c_material = st.sidebar.checkbox("Material Type", value=True)
+    c_process = st.sidebar.checkbox("Welding Process", value=True)
+    c_line = st.sidebar.checkbox("Line", value=False)
 
     db_criteria_map = []
     if c_subc: db_criteria_map.append('Subc')
