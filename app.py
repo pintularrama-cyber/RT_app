@@ -5,27 +5,24 @@ from datetime import datetime
 
 # --- OPTIMIZATION ENGINE ---
 class RTOptimizerEngine:
-    def __init__(self, fallback_rt_perc, window_days, lot_criteria, selected_location_scope):
+    def __init__(self, fallback_rt_perc, window_days, lot_criteria, selected_location_scope, project_start_date):
         self.fallback_rt_perc = fallback_rt_perc
         self.window_days = window_days
         self.lot_criteria = lot_criteria 
         self.scope = selected_location_scope
+        self.project_start_date = pd.to_datetime(project_start_date) # Fecha de referencia fija
 
     def get_lot_audit(self, df):
         # 1. Sanitization
         df['Dateofweld'] = pd.to_datetime(df['Dateofweld'], dayfirst=True, errors='coerce')
         df['RTDate1'] = pd.to_datetime(df['RTDate1'], dayfirst=True, errors='coerce')
         df['RT_Perc'] = pd.to_numeric(df['RT_Perc'], errors='coerce')
-        
-        # --- LÓGICA DE FALLBACK CORREGIDA ---
-        # Tratamos el 0 y el Nulo como "información faltante" y aplicamos el Fallback
         df['RT_Perc'] = df['RT_Perc'].replace(0, np.nan).fillna(self.fallback_rt_perc * 100)
         
         # 2. Location Mapping
         location_map = {"WS": ["YWS", "S", "WS"], "FW": ["YFW", "FW", "F"], "PL": ["PL"]}
         allowed_values = location_map.get(self.scope, [])
         
-        # Filtramos por Scope y solo quitamos las de 100% (Las de 0% ahora tienen el Fallback)
         df_filtered = df[
             (df['location'].isin(allowed_values)) & 
             (df['RT_Perc'] < 100)
@@ -33,9 +30,9 @@ class RTOptimizerEngine:
         
         if df_filtered.empty: return pd.DataFrame(), pd.DataFrame()
 
-        # 3. Time Blocks
-        start_date = df_filtered['Dateofweld'].min()
-        df_filtered['Block_ID'] = ((df_filtered['Dateofweld'] - start_date).dt.days // self.window_days).fillna(-1).astype(int)
+        # 3. FIXED TIME BLOCKS (Using the fixed start date)
+        # Esto asegura que el Lote_ID sea inmutable en futuras cargas
+        df_filtered['Block_ID'] = ((df_filtered['Dateofweld'] - self.project_start_date).dt.days // self.window_days).fillna(-1).astype(int)
         
         # 4. Lot ID Building
         def build_lot_id(row):
@@ -115,6 +112,17 @@ st.title(":material/engineering: RT Optimizer")
 # 1. SIDEBAR
 st.sidebar.header(":material/settings: Configuration")
 
+# NUEVO: Selector de fecha de inicio del proyecto (CRUCIAL PARA ESTABILIDAD)
+proj_start = st.sidebar.date_input(
+    "Project Start Date", 
+    value=datetime(2024, 1, 1),
+    help="This is the fixed 'Day 0' of the project. Changing this will shift all historical lots. Set it once and keep it fixed."
+)
+
+location_scope = st.sidebar.radio("Location Scope:", options=["WS", "FW", "PL"])
+
+st.sidebar.divider()
+
 uploaded_file = st.file_uploader("Upload Daily SQL Extraction (CSV)", type="csv")
 
 if uploaded_file:
@@ -126,41 +134,27 @@ if uploaded_file:
     if 'Subc' in df_input.columns and 'location' in df_input.columns:
         subs_list = sorted(df_input['Subc'].unique())
         selected_sub = st.sidebar.selectbox("🎯 Target Subcontractor:", options=subs_list)
-        
         available_scopes = get_available_scopes_for_sub(df_input, selected_sub)
+        
         if available_scopes:
-            location_scope = st.sidebar.radio(
-                f"Location Scope for {selected_sub}:", 
-                options=available_scopes,
-                help="Only locations where this subcontractor has registered joints are shown."
-            )
+            location_scope = st.sidebar.radio(f"Location Scope for {selected_sub}:", options=available_scopes)
         else:
-            st.sidebar.warning("No valid locations found for this Subcontractor.")
+            st.sidebar.warning("No valid locations found.")
             st.stop()
     else:
-        st.error("CSV must contain 'Subc' and 'location' columns.")
+        st.error("Missing 'Subc' or 'location' columns.")
         st.stop()
 
-    days_per_lot = st.sidebar.number_input(
-        "Days per Window", 
-        min_value=1, value=14,
-        help="Period of time which defines a Block"
-    )
-    
-    fallback_percentage = st.sidebar.slider(
-        "Fallback RT %", 
-        0, 100, 10,
-        help="This value is applied if 'RT_Perc' is empty OR 0 in the CSV file."
-    )
-    st.sidebar.caption("⚠️ *Fallback acts as a default for uninitialized data (0 or Null).*")
+    days_per_lot = st.sidebar.number_input("Days per Window", min_value=1, value=14)
+    fallback_percentage = st.sidebar.slider("Fallback RT %", 0, 100, 10)
 
     st.sidebar.divider()
     st.sidebar.subheader("Lot Identity Factors")
-    c_subc = st.sidebar.checkbox("Subcontractor", value=True)
-    c_welder = st.sidebar.checkbox("Welder ID", value=True)
-    c_material = st.sidebar.checkbox("Material Type", value=True)
-    c_process = st.sidebar.checkbox("Welding Process", value=True)
-    c_line = st.sidebar.checkbox("Line", value=False)
+    c_subc = st.sidebar.checkbox("Subcontractor (Subc)", value=True)
+    c_welder = st.sidebar.checkbox("Welder ID (Welder1)", value=True)
+    c_material = st.sidebar.checkbox("Material Type (MaterialType)", value=True)
+    c_process = st.sidebar.checkbox("Welding Process (WPS.1.Description)", value=True)
+    c_line = st.sidebar.checkbox("Line ID (Line)", value=False)
 
     db_criteria_map = []
     if c_subc: db_criteria_map.append('Subc')
@@ -169,34 +163,38 @@ if uploaded_file:
     if c_process: db_criteria_map.append('WPS.1.Description')
     if c_line: db_criteria_map.append('Line')
 
-    engine = RTOptimizerEngine(fallback_percentage/100, days_per_lot, db_criteria_map, location_scope)
+    # INICIALIZAR MOTOR CON LA FECHA FIJA
+    engine = RTOptimizerEngine(fallback_percentage/100, days_per_lot, db_criteria_map, location_scope, proj_start)
     audit_df, df_with_lots = engine.get_lot_audit(df_input)
 
     if audit_df.empty:
-        st.warning(f"⚠️ No joints found for scope '{location_scope}' (All are 100% or excluded).")
+        st.warning(f"⚠️ No joints found for scope '{location_scope}'.")
     else:
-        tab1, tab2 = st.tabs(["📋 Work Order Generator", "📊 Dashboard & Lot Explorer"])
+        tab1, tab2 = st.tabs([":material/assignment: Work Order", ":material/dashboard: Dashboard"])
 
         with tab1:
             st.subheader(f"Inspection Plan: {selected_sub} | Scope: {location_scope}")
             sub_df_lots = df_with_lots[df_with_lots['Subc'] == selected_sub]
             sub_audit = audit_df[audit_df['Subcontractor'] == selected_sub]
             
-            if st.button(f"🚀 Generate Inspection Plan"):
-                with st.spinner('Optimizing synergies...'):
+            if st.button(f"🚀 Generate Plan"):
+                with st.spinner('Optimizing...'):
                     result = engine.execute_optimization(sub_df_lots, sub_audit.copy())
                     if not result.empty:
                         st.write(f"Recommended Inspections: **{len(result)}**")
                         display_cols = ['Joint_ID', 'Subc', 'Welder1', 'Line', 'location', 'MaterialType', 'WPS.1.Description', 'Dateofweld', 'RT_Perc']
                         st.dataframe(result[[c for c in display_cols if c in result.columns]], use_container_width=True, hide_index=True)
                         csv_data = result.to_csv(sep=';', index=False).encode('utf-8-sig')
-                        st.download_button("📥 Download Plan (CSV)", csv_data, f"plan_{selected_sub}_{location_scope}.csv", "text/csv")
+                        st.download_button("📥 Download Plan (CSV)", csv_data, f"plan_{selected_sub}.csv", "text/csv")
                     else:
-                        st.success("✅ Compliance achieved for this scope.")
+                        st.success("✅ Compliance achieved.")
 
         with tab2:
+            view_option = st.selectbox("📊 Dashboard View Scope:", options=["ALL"] + subs_list, index=subs_list.index(selected_sub)+1)
+            dash_audit = audit_df.copy() if view_option == "ALL" else audit_df[audit_df['Subcontractor'] == view_option]
+            
             k1, k2, k3, k4 = st.columns(4)
-            total_l = len(dash_audit := (audit_df.copy() if (view_option := st.selectbox("📊 Dashboard View Scope:", options=["ALL"] + subs_list, index=subs_list.index(selected_sub)+1)) == "ALL" else audit_df[audit_df['Subcontractor'] == view_option]))
+            total_l = len(dash_audit)
             open_l = len(dash_audit[dash_audit['Status'] == '🔴 OPEN'])
             k1.metric("Total Lots", total_l)
             k2.metric("Open Lots", open_l)
@@ -229,15 +227,4 @@ if uploaded_file:
                 st.caption("💡 Click on a row above to see individual joints.")
 
 else:
-    st.info("💡 **Awaiting Data.** Please upload your SQL CSV extraction to begin.")
-    st.markdown("### Required CSV Data Structure")
-    example_schema = {
-        'Column Name': ['Joint_ID', 'Subc', 'Welder1', 'Line', 'location', 'MaterialType', 'WPS.1.Description', 'Dateofweld', 'RTDate1', 'RT_Perc'],
-        'Description': ['Unique ID', 'Subcontractor', 'Welder ID', 'Line Number', 'Location Type', 'Material Group', 'Welding Process', 'DD/MM/YYYY', 'Empty if pending', 'Target % (5, 10, 100)']
-    }
-    st.table(pd.DataFrame(example_schema))
-    st.markdown("""
-    **Scope Rules:**
-    *   `RT_Perc` = 100: Mandatory inspections (automatically excluded from lot sampling).
-    *   `RT_Perc` = 0 or Null: Missing info. **Fallback RT %** value from sidebar will be applied.
-    """)
+    st.info("💡 Please upload your SQL CSV extraction to begin.")
