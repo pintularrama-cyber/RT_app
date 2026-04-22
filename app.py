@@ -119,8 +119,6 @@ proj_start = st.sidebar.date_input(
     help="This is the fixed 'Day 0' of the project. Changing this will shift all historical lots. Set it once and keep it fixed."
 )
 
-location_scope = st.sidebar.radio("Location Scope:", options=["WS", "FW", "PL"])
-
 st.sidebar.divider()
 
 uploaded_file = st.file_uploader("Upload Daily SQL Extraction (CSV)", type="csv")
