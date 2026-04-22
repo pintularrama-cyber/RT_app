@@ -13,7 +13,7 @@ class RTOptimizerEngine:
         self.project_start_date = pd.to_datetime(project_start_date)
 
     def get_lot_audit(self, df):
-        # 1. Saneamiento y filtrado de nulos en fecha de soldadura
+        # 1. Sanitization & Mandatory Filtering
         d = df.copy()
         d['Dateofweld'] = pd.to_datetime(d['Dateofweld'], dayfirst=True, errors='coerce')
         d['RTDate1'] = pd.to_datetime(d['RTDate1'], dayfirst=True, errors='coerce')
@@ -25,7 +25,7 @@ class RTOptimizerEngine:
         # Fallback: 0 o Nulo -> Valor del slider
         d['RT_Perc'] = d['RT_Perc'].replace(0, np.nan).fillna(self.fallback_rt_perc * 100)
         
-        # 2. Mapeo de Ubicación (Location Mapping)
+        # 2. Location Mapping
         location_map = {"WS": ["YWS", "S", "WS"], "FW": ["YFW", "FW", "F"], "PL": ["PL"]}
         allowed_values = location_map.get(self.scope, [])
         
@@ -122,7 +122,7 @@ st.sidebar.header(":material/settings: Configuration")
 proj_start = st.sidebar.date_input(
     "Project Start Date", 
     value=datetime(2025, 1, 1),
-    help="Fixed 'Day 0'. Fundamental for lot stability."
+    help="Fixed 'Day 0'. Essential for lot stability across different uploads."
 )
 
 st.sidebar.divider()
@@ -131,25 +131,19 @@ uploaded_file = st.file_uploader("Upload Daily SQL Extraction (CSV)", type="csv"
 
 if uploaded_file:
     df_input = pd.read_csv(uploaded_file, sep=';')
-    
-    # NORMALIZACIÓN DE CABECERAS (Evita KeyErrors por mayúsculas/minúsculas)
-    # Ejemplo: Si el CSV trae 'Welder1' o 'welder1', la app lo entenderá igual
     df_input.columns = df_input.columns.str.strip()
     
-    # Lista de nombres obligatorios tal y como los usa el código
     required_cols = ['Joint_ID', 'Subc', 'Welder1', 'location', 'MaterialType', 'WPS.1.Description', 'Dateofweld', 'RTDate1', 'RT_Perc']
     
-    # Comprobación de existencia de columnas (Case-insensitive)
     missing = []
     for col in required_cols:
         if not any(c.lower() == col.lower() for c in df_input.columns):
             missing.append(col)
     
     if missing:
-        st.error(f"❌ Error: Your CSV is missing these mandatory columns: {missing}")
-        st.info("💡 Please refer to the 'Required CSV Data Structure' table shown when no file is uploaded.")
+        st.error(f"❌ Error: Missing mandatory columns: {missing}")
     else:
-        # Renombramos las columnas del CSV a los nombres internos exactos para el motor
+        # Normalización de cabeceras
         new_cols = {}
         for col in df_input.columns:
             for req in required_cols:
@@ -157,18 +151,15 @@ if uploaded_file:
                     new_cols[col] = req
         df_input.rename(columns=new_cols, inplace=True)
         
-        # Limpieza de espacios en celdas
         for col in df_input.select_dtypes(['object']).columns:
             df_input[col] = df_input[col].astype(str).str.strip()
 
-        # Selección de Subcontratista y Ubicación
         subs_list = sorted(df_input['Subc'].unique())
         selected_sub = st.sidebar.selectbox("🎯 Target Subcontractor:", options=subs_list)
         available_scopes = get_available_scopes_for_sub(df_input, selected_sub)
         
         if available_scopes:
             location_scope = st.sidebar.radio(f"Location Scope for {selected_sub}:", options=available_scopes)
-            
             days_per_lot = st.sidebar.number_input("Days per Window", min_value=1, value=14)
             fallback_percentage = st.sidebar.slider("Fallback RT %", 0, 100, 10)
             st.sidebar.caption("⚠️ *Fallback for missing/zero data.*")
@@ -176,8 +167,8 @@ if uploaded_file:
             st.sidebar.divider()
             c_subc = st.sidebar.checkbox("Subcontractor (Subc)", value=True)
             c_welder = st.sidebar.checkbox("Welder ID (Welder1)", value=True)
-            c_material = st.sidebar.checkbox("Material (MaterialType)", value=True)
-            c_process = st.sidebar.checkbox("Process (WPS.1.Description)", value=True)
+            c_material = st.sidebar.checkbox("Material Type (MaterialType)", value=True)
+            c_process = st.sidebar.checkbox("Welding Process (WPS.1.Description)", value=True)
             c_line = st.sidebar.checkbox("Line ID (Line)", value=False)
 
             db_criteria_map = []
@@ -187,12 +178,12 @@ if uploaded_file:
             if c_process: db_criteria_map.append('WPS.1.Description')
             if c_line: db_criteria_map.append('Line')
 
-            # --- MOTOR ---
+            # --- ENGINE ---
             engine = RTOptimizerEngine(fallback_percentage/100, days_per_lot, db_criteria_map, location_scope, proj_start)
             audit_df, df_with_lots = engine.get_lot_audit(df_input)
 
             if audit_df.empty:
-                st.warning(f"⚠️ No juntas found for scope '{location_scope}' (All are 100% or dates are before Start Date).")
+                st.warning(f"⚠️ No juntas found for scope '{location_scope}'.")
             else:
                 tab1, tab2 = st.tabs([":material/assignment: Work Order", ":material/dashboard: Dashboard"])
 
@@ -202,18 +193,22 @@ if uploaded_file:
                     sub_audit = audit_df[audit_df['Subcontractor'] == selected_sub]
                     
                     if st.button(f"🚀 Generate Plan"):
-                        result = engine.execute_optimization(sub_df_lots, sub_audit.copy())
-                        if not result.empty:
-                            st.write(f"Recommended Inspections: **{len(result)}**")
-                            display_cols = ['Joint_ID', 'Subc', 'Welder1', 'Line', 'location', 'MaterialType', 'WPS.1.Description', 'Dateofweld', 'RT_Perc']
-                            st.dataframe(result[[c for c in display_cols if c in result.columns]], use_container_width=True, hide_index=True)
-                            csv_data = result.to_csv(sep=';', index=False).encode('utf-8-sig')
-                            st.download_button("📥 Download Plan (CSV)", csv_data, f"plan_{selected_sub}_{location_scope}.csv", "text/csv")
-                        else:
-                            st.success("✅ Compliance achieved.")
+                        with st.spinner('Calculating...'):
+                            result = engine.execute_optimization(sub_df_lots, sub_audit.copy())
+                            if not result.empty:
+                                st.write(f"Recommended Inspections: **{len(result)}**")
+                                # --- SE AÑADE Lot_ID A LA LISTA DE COLUMNAS ---
+                                display_cols = ['Joint_ID', 'Lot_ID', 'Welder1', 'Line', 'MaterialType', 'WPS.1.Description', 'Dateofweld', 'RT_Perc']
+                                actual_display = [c for c in display_cols if c in result.columns]
+                                st.dataframe(result[actual_display], use_container_width=True, hide_index=True)
+                                
+                                csv_data = result.to_csv(sep=';', index=False).encode('utf-8-sig')
+                                st.download_button("📥 Download Plan (CSV)", csv_data, f"plan_{selected_sub}.csv", "text/csv")
+                            else:
+                                st.success("✅ Compliance achieved.")
 
                 with tab2:
-                    view_option = st.selectbox("📊 Dashboard View:", options=["ALL"] + subs_list, index=subs_list.index(selected_sub)+1)
+                    view_option = st.selectbox("📊 Dashboard View Scope:", options=["ALL"] + subs_list, index=subs_list.index(selected_sub)+1)
                     dash_audit = audit_df.copy() if view_option == "ALL" else audit_df[audit_df['Subcontractor'] == view_option]
                     
                     k1, k2, k3, k4 = st.columns(4)
@@ -246,19 +241,15 @@ if uploaded_file:
                         st.markdown(f"### 🔍 Detailed Explorer: Lot `{lot_id}`")
                         joints_in_lot = df_with_lots[df_with_lots['Lot_ID'] == lot_id]
                         st.dataframe(joints_in_lot[['Joint_ID', 'Subc', 'Welder1', 'Line', 'Dateofweld', 'RTDate1', 'RT_Perc']], use_container_width=True, hide_index=True)
+                    else:
+                        st.caption("💡 Click on a row above to see individual joints.")
         else:
             st.sidebar.warning("No valid locations found.")
 else:
     st.info("💡 **Awaiting Data.** Please upload your SQL CSV extraction to begin.")
     st.markdown("### Required CSV Data Structure")
     example_schema = {
-        'Mandatory Column Name': ['Joint_ID', 'Subc', 'Welder1', 'Line', 'location', 'MaterialType', 'WPS.1.Description', 'Dateofweld', 'RTDate1', 'RT_Perc'],
-        'Description': ['Unique ID', 'Subcontractor', 'Welder ID', 'Line Number', 'Location Type (YWS, YFW, etc.)', 'Material Group', 'Welding Process', 'DD/MM/YYYY', 'Empty if pending', 'Target %']
+        'Column Name': ['Joint_ID', 'Subc', 'Welder1', 'Line', 'location', 'MaterialType', 'WPS.1.Description', 'Dateofweld', 'RTDate1', 'RT_Perc'],
+        'Description': ['Unique ID', 'Subcontractor', 'Welder ID', 'Line Number', 'Location Type', 'Material Group', 'Welding Process', 'DD/MM/YYYY', 'Empty if pending', 'Target %']
     }
     st.table(pd.DataFrame(example_schema))
-    st.markdown("""
-    **Format Rules:**
-    *   **Separator:** Semicolon (`;`)
-    *   **Empty Dates:** Ignore juntas without `Dateofweld`.
-    *   **Fallback:** `RT_Perc` = 0 or Null will be filled with the sidebar percentage.
-    """)
