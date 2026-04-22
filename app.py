@@ -22,14 +22,12 @@ class RTOptimizerEngine:
         d = d.dropna(subset=['Dateofweld'])
         
         d['RT_Perc'] = pd.to_numeric(d['RT_Perc'], errors='coerce')
-        # Fallback: 0 o Nulo -> Valor del slider
         d['RT_Perc'] = d['RT_Perc'].replace(0, np.nan).fillna(self.fallback_rt_perc * 100)
         
         # 2. Location Mapping
         location_map = {"WS": ["YWS", "S", "WS"], "FW": ["YFW", "FW", "F"], "PL": ["PL"]}
         allowed_values = location_map.get(self.scope, [])
         
-        # Filtrar por Ámbito y Reglas de Muestreo (Ignorar 100% mandatorio)
         df_filtered = d[
             (d['location'].isin(allowed_values)) & 
             (d['RT_Perc'] < 100)
@@ -37,21 +35,20 @@ class RTOptimizerEngine:
         
         if df_filtered.empty: return pd.DataFrame(), pd.DataFrame()
 
-        # 3. Bloques de Tiempo Fijos
+        # 3. Fixed Time Blocks
         df_filtered['Block_ID'] = ((df_filtered['Dateofweld'] - self.project_start_date).dt.days // self.window_days).fillna(-1).astype(int)
         
-        # 4. Construcción de Lote_ID
+        # 4. Lot ID Building
         def build_lot_id(row):
             parts = [str(row['Block_ID'])]
             for criterion in self.lot_criteria:
                 parts.append(str(row[criterion]))
             return "_".join(parts)
 
-        # Solo auditamos juntas dentro o después de la fecha de inicio
         df_audit_base = df_filtered[df_filtered['Block_ID'] >= 0].copy()
         df_audit_base['Lot_ID'] = df_audit_base.apply(build_lot_id, axis=1)
 
-        # 5. Agrupación de Auditoría
+        # 5. Grouping
         audit = df_audit_base.groupby('Lot_ID').agg(
             Total_Joints=('Joint_ID', 'count'), 
             Current_RT_Done=('RTDate1', 'count'),
@@ -178,7 +175,6 @@ if uploaded_file:
             if c_process: db_criteria_map.append('WPS.1.Description')
             if c_line: db_criteria_map.append('Line')
 
-            # --- ENGINE ---
             engine = RTOptimizerEngine(fallback_percentage/100, days_per_lot, db_criteria_map, location_scope, proj_start)
             audit_df, df_with_lots = engine.get_lot_audit(df_input)
 
@@ -192,18 +188,23 @@ if uploaded_file:
                     sub_df_lots = df_with_lots[df_with_lots['Subc'] == selected_sub]
                     sub_audit = audit_df[audit_df['Subcontractor'] == selected_sub]
                     
-                    if st.button(f"🚀 Generate Plan"):
+                    if st.button(f"🚀 Generate Inspection Plan"):
                         with st.spinner('Calculating...'):
                             result = engine.execute_optimization(sub_df_lots, sub_audit.copy())
                             if not result.empty:
+                                # --- NUEVO: AÑADIR COLUMNA DE FECHA DE GENERACIÓN ---
+                                result['Plan_Date'] = datetime.now().strftime('%d/%m/%Y')
+                                
                                 st.write(f"Recommended Inspections: **{len(result)}**")
-                                # --- SE AÑADE Lot_ID A LA LISTA DE COLUMNAS ---
-                                display_cols = ['Joint_ID', 'Lot_ID', 'Welder1', 'Line', 'MaterialType', 'WPS.1.Description', 'Dateofweld', 'RT_Perc']
+                                
+                                # Reordenamos las columnas para mostrar la fecha de generación al principio
+                                display_cols = ['Joint_ID', 'Plan_Date', 'Lot_ID', 'Welder1', 'Line', 'MaterialType', 'WPS.1.Description', 'Dateofweld', 'RT_Perc']
                                 actual_display = [c for c in display_cols if c in result.columns]
+                                
                                 st.dataframe(result[actual_display], use_container_width=True, hide_index=True)
                                 
                                 csv_data = result.to_csv(sep=';', index=False).encode('utf-8-sig')
-                                st.download_button("📥 Download Plan (CSV)", csv_data, f"plan_{selected_sub}.csv", "text/csv")
+                                st.download_button("📥 Download Plan (CSV)", csv_data, f"plan_{selected_sub}_{datetime.now().strftime('%Y%m%d')}.csv", "text/csv")
                             else:
                                 st.success("✅ Compliance achieved.")
 
