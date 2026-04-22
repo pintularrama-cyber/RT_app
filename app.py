@@ -10,28 +10,34 @@ class RTOptimizerEngine:
         self.window_days = window_days
         self.lot_criteria = lot_criteria 
         self.scope = selected_location_scope
-        self.project_start_date = pd.to_datetime(project_start_date) # Fecha de referencia fija
+        self.project_start_date = pd.to_datetime(project_start_date)
 
     def get_lot_audit(self, df):
-        # 1. Sanitization
-        df['Dateofweld'] = pd.to_datetime(df['Dateofweld'], dayfirst=True, errors='coerce')
-        df['RTDate1'] = pd.to_datetime(df['RTDate1'], dayfirst=True, errors='coerce')
-        df['RT_Perc'] = pd.to_numeric(df['RT_Perc'], errors='coerce')
-        df['RT_Perc'] = df['RT_Perc'].replace(0, np.nan).fillna(self.fallback_rt_perc * 100)
+        # 1. Sanitization & Mandatory Filtering
+        d = df.copy()
+        d['Dateofweld'] = pd.to_datetime(d['Dateofweld'], dayfirst=True, errors='coerce')
+        d['RTDate1'] = pd.to_datetime(d['RTDate1'], dayfirst=True, errors='coerce')
+        
+        # --- REGLA SOLICITADA: Ignorar juntas sin fecha de soldadura ---
+        d = d.dropna(subset=['Dateofweld'])
+        
+        d['RT_Perc'] = pd.to_numeric(d['RT_Perc'], errors='coerce')
+        # Fallback: 0 o Nulo se convierte en el valor del slider
+        d['RT_Perc'] = d['RT_Perc'].replace(0, np.nan).fillna(self.fallback_rt_perc * 100)
         
         # 2. Location Mapping
         location_map = {"WS": ["YWS", "S", "WS"], "FW": ["YFW", "FW", "F"], "PL": ["PL"]}
         allowed_values = location_map.get(self.scope, [])
         
-        df_filtered = df[
-            (df['location'].isin(allowed_values)) & 
-            (df['RT_Perc'] < 100)
+        # Filter by Scope and Sampling Rules (Ignore 100% mandatory)
+        df_filtered = d[
+            (d['location'].isin(allowed_values)) & 
+            (d['RT_Perc'] < 100)
         ].copy()
         
         if df_filtered.empty: return pd.DataFrame(), pd.DataFrame()
 
-        # 3. FIXED TIME BLOCKS (Using the fixed start date)
-        # Esto asegura que el Lote_ID sea inmutable en futuras cargas
+        # 3. Fixed Time Blocks
         df_filtered['Block_ID'] = ((df_filtered['Dateofweld'] - self.project_start_date).dt.days // self.window_days).fillna(-1).astype(int)
         
         # 4. Lot ID Building
@@ -41,6 +47,7 @@ class RTOptimizerEngine:
                 parts.append(str(row[criterion]))
             return "_".join(parts)
 
+        # Ensure we only audit joints within or after the project start date
         df_audit_base = df_filtered[df_filtered['Block_ID'] >= 0].copy()
         df_audit_base['Lot_ID'] = df_audit_base.apply(build_lot_id, axis=1)
 
@@ -112,11 +119,10 @@ st.title(":material/engineering: RT Optimizer")
 # 1. SIDEBAR
 st.sidebar.header(":material/settings: Configuration")
 
-# NUEVO: Selector de fecha de inicio del proyecto (CRUCIAL PARA ESTABILIDAD)
 proj_start = st.sidebar.date_input(
     "Project Start Date", 
-    value=datetime(2024, 1, 1),
-    help="This is the fixed 'Day 0' of the project. Changing this will shift all historical lots. Set it once and keep it fixed."
+    value=datetime(2025, 1, 1),
+    help="Fixed 'Day 0'. Essential for lot stability across different data uploads."
 )
 
 st.sidebar.divider()
@@ -140,11 +146,16 @@ if uploaded_file:
             st.sidebar.warning("No valid locations found.")
             st.stop()
     else:
-        st.error("Missing 'Subc' or 'location' columns.")
+        st.error("Critical columns 'Subc' or 'location' missing in CSV.")
         st.stop()
 
     days_per_lot = st.sidebar.number_input("Days per Window", min_value=1, value=14)
-    fallback_percentage = st.sidebar.slider("Fallback RT %", 0, 100, 10)
+    
+    fallback_percentage = st.sidebar.slider(
+        "Fallback RT %", 0, 100, 10,
+        help="Applied if RT_Perc is empty or 0. Treats 0 as uninitialized data."
+    )
+    st.sidebar.caption("⚠️ *Fallback acts as default for missing/zero data.*")
 
     st.sidebar.divider()
     st.sidebar.subheader("Lot Identity Factors")
@@ -161,12 +172,11 @@ if uploaded_file:
     if c_process: db_criteria_map.append('WPS.1.Description')
     if c_line: db_criteria_map.append('Line')
 
-    # INICIALIZAR MOTOR CON LA FECHA FIJA
     engine = RTOptimizerEngine(fallback_percentage/100, days_per_lot, db_criteria_map, location_scope, proj_start)
     audit_df, df_with_lots = engine.get_lot_audit(df_input)
 
     if audit_df.empty:
-        st.warning(f"⚠️ No joints found for scope '{location_scope}'.")
+        st.warning(f"⚠️ No juntas found for scope '{location_scope}' (Check dates and RT_Perc).")
     else:
         tab1, tab2 = st.tabs([":material/assignment: Work Order", ":material/dashboard: Dashboard"])
 
@@ -175,7 +185,7 @@ if uploaded_file:
             sub_df_lots = df_with_lots[df_with_lots['Subc'] == selected_sub]
             sub_audit = audit_df[audit_df['Subcontractor'] == selected_sub]
             
-            if st.button(f"🚀 Generate Plan"):
+            if st.button(f"🚀 Generate Inspection Plan"):
                 with st.spinner('Optimizing...'):
                     result = engine.execute_optimization(sub_df_lots, sub_audit.copy())
                     if not result.empty:
@@ -225,4 +235,16 @@ if uploaded_file:
                 st.caption("💡 Click on a row above to see individual joints.")
 
 else:
-    st.info("💡 Please upload your SQL CSV extraction to begin.")
+    st.info("💡 **Awaiting Data.** Please upload your SQL CSV extraction to begin.")
+    st.markdown("### Required CSV Data Structure")
+    example_schema = {
+        'Column Name': ['Joint_ID', 'Subc', 'Welder1', 'Line', 'location', 'MaterialType', 'WPS.1.Description', 'Dateofweld', 'RTDate1', 'RT_Perc'],
+        'Description': ['Unique ID', 'Subcontractor', 'Welder ID', 'Line Number', 'Location Type', 'Material Group', 'Welding Process', 'DD/MM/YYYY', 'Empty if pending', 'Target %']
+    }
+    st.table(pd.DataFrame(example_schema))
+    st.markdown("""
+    **Processing Rules:**
+    *   **Dateofweld:** Rows with empty welding dates are automatically ignored.
+    *   **RT_Perc = 100:** Mandatory inspections excluded from sampling logic.
+    *   **RT_Perc = 0 or Null:** Falling back to the sidebar percentage value.
+    """)
