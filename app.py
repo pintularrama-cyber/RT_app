@@ -211,7 +211,7 @@ if uploaded_file:
                             result['Plan_Date'] = datetime.now().strftime('%d/%m/%Y')
                             st.write(f"Recommended Inspections: **{len(result)}**")
                             st.dataframe(result, use_container_width=True, hide_index=True)
-                            st.download_button("📥 Download Plan", result.to_csv(sep=';', index=False).encode('utf-8-sig'), f"plan_{selected_sub}.csv", "text/csv")
+                            st.download_button("📥 Download Inspection Plan", result.to_csv(sep=';', index=False).encode('utf-8-sig'), f"plan_{selected_sub}.csv", "text/csv")
                         else:
                             st.success("✅ Compliance achieved.")
 
@@ -224,7 +224,7 @@ if uploaded_file:
                     k1, k2, k3, k4, k5 = st.columns(5)
                     total_l = len(dash_audit); open_l = len(dash_audit[dash_audit['Status'] == '🔴 OPEN'])
                     k1.metric("Total Lots", total_l); k2.metric("Open Lots", open_l)
-                    k3.metric("Project Compliance", f"{((total_l - open_l)/total_l)*100:.1f}%" if total_l > 0 else "0%")
+                    k3.metric("Closed lots percentage", f"{((total_l - open_l)/total_l)*100:.1f}%" if total_l > 0 else "0%")
                     k4.metric("Avg. Actual RT %", f"{dash_audit['Current_RT_Done_%'].mean():.1f}%" if total_l > 0 else "0%")
                     k5.metric("Avg. Target RT %", f"{dash_audit['Current_RT_Req'].mean():.1f}%" if total_l > 0 else "0%")
                     st.divider()
@@ -243,7 +243,7 @@ if uploaded_file:
                     st.write("**Inflow:**")
                     st.write(f"- Total joints in CSV: {diagnostic['raw_count']}")
                     st.write(f"- Dropped (No Dateofweld): {diagnostic['dropped_no_date']}")
-                    st.write(f"- Dropped (Wrong Location Scope): {diagnostic['dropped_wrong_scope']}")
+                    st.write(f"- Dropped (Other Subcontractor Scope): {diagnostic['dropped_wrong_scope']}")
                     st.write(f"- Dropped (RT_Perc = 100%): {diagnostic['dropped_mandatory']}")
                 
                 with c2:
