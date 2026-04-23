@@ -38,16 +38,13 @@ class RTOptimizerEngine:
         return pd.concat(processed_chunks) if processed_chunks else df
 
     def get_lot_audit(self, df):
-        diag_info = {} # Diccionario para la pestaña de diagnóstico
-        
-        # 1. Sanitization
+        diag_info = {}
         d = df.copy()
         diag_info['raw_count'] = len(d)
         
         d['Dateofweld'] = pd.to_datetime(d['Dateofweld'], errors='coerce')
         d['RTDate1'] = pd.to_datetime(d['RTDate1'], errors='coerce')
         
-        # Filtrar juntas sin fecha de soldadura
         d_no_date = d[d['Dateofweld'].isna()]
         d = d.dropna(subset=['Dateofweld'])
         diag_info['dropped_no_date'] = len(d_no_date)
@@ -56,32 +53,22 @@ class RTOptimizerEngine:
         
         d['RT_Perc'] = pd.to_numeric(d['RT_Perc'], errors='coerce').replace(0, np.nan).fillna(self.fallback_rt_perc * 100)
         
-        # 2. Location Mapping
         location_map = {"WS": ["YWS", "S", "WS"], "FW": ["YFW", "FW", "F"], "PL": ["PL"]}
         allowed_values = location_map.get(self.scope, [])
         
-        # Juntas fuera de ámbito (Location)
         d_wrong_scope = d[~d['location'].isin(allowed_values)]
         diag_info['dropped_wrong_scope'] = len(d_wrong_scope)
         
-        # Juntas al 100% (Mandatorias)
         d_mandatory = d[(d['location'].isin(allowed_values)) & (d['RT_Perc'] >= 100)]
         diag_info['dropped_mandatory'] = len(d_mandatory)
         
-        # Filtrado final para el motor
-        df_filtered = d[
-            (d['location'].isin(allowed_values)) & 
-            (d['RT_Perc'] < 100)
-        ].copy()
-        
+        df_filtered = d[(d['location'].isin(allowed_values)) & (d['RT_Perc'] < 100)].copy()
         diag_info['final_pool'] = len(df_filtered)
         
         if df_filtered.empty: return pd.DataFrame(), pd.DataFrame(), diag_info
 
-        # 3. Dynamic Blocks
         df_with_blocks = self._assign_dynamic_blocks(df_filtered)
         
-        # 4. Lot ID Building
         def build_lot_id(row):
             parts = [str(row['Block_ID'])]
             for criterion in self.lot_criteria:
@@ -90,7 +77,6 @@ class RTOptimizerEngine:
 
         df_with_blocks['Lot_ID'] = df_with_blocks.apply(build_lot_id, axis=1)
 
-        # 5. Grouping Audit
         audit = df_with_blocks.groupby('Lot_ID').agg(
             Total_Joints=('Joint_ID', 'count'), 
             Current_RT_Done=('RTDate1', 'count'),
@@ -140,12 +126,17 @@ class RTOptimizerEngine:
         return pd.DataFrame(inspection_plan)
 
 # --- UTILS ---
-def get_available_scopes_for_sub(df, sub_name):
+def get_available_scopes(df, selected_sub):
     location_map = {"WS": ["YWS", "S", "WS"], "FW": ["YFW", "FW", "F"], "PL": ["PL"]}
-    sub_locs = df[df['Subc'] == sub_name]['location'].unique()
+    # Si es ALL, miramos todas las locaciones del archivo. Si no, solo las del subcontratista.
+    if selected_sub == "ALL":
+        locs = df['location'].unique()
+    else:
+        locs = df[df['Subc'] == selected_sub]['location'].unique()
+    
     available = []
     for scope, vals in location_map.items():
-        if any(loc in sub_locs for loc in vals): available.append(scope)
+        if any(loc in locs for loc in vals): available.append(scope)
     return available
 
 # --- USER INTERFACE ---
@@ -157,31 +148,27 @@ st.sidebar.header(":material/settings: Configuration")
 uploaded_file = st.file_uploader("Upload Daily SQL Extraction (CSV)", type="csv")
 
 if uploaded_file:
-    # Solución al BOM y espacios en blanco
     df_input = pd.read_csv(uploaded_file, sep=';', encoding='utf-8-sig')
     df_input.columns = df_input.columns.str.strip()
     
-    # Limpieza agresiva de todas las celdas de texto
     for col in df_input.select_dtypes(['object']).columns:
         df_input[col] = df_input[col].astype(str).str.strip()
 
     required_cols = ['Joint_ID', 'Subc', 'Welder1', 'Line', 'location', 'MaterialType', 'WPS.1.Description', 'Dateofweld', 'RTDate1', 'RT_Perc']
-    
-    # Normalización de cabeceras
     new_cols = {col: req for col in df_input.columns for req in required_cols if col.lower() == req.lower()}
     df_input.rename(columns=new_cols, inplace=True)
     
-    missing = [c for c in required_cols if c not in df_input.columns]
-    
-    if missing:
-        st.error(f"❌ Missing columns: {missing}")
+    if not all(c in df_input.columns for c in required_cols):
+        st.error(f"❌ Missing columns. Required: {required_cols}")
     else:
-        subs_list = sorted(df_input['Subc'].unique())
+        # --- SIDEBAR DINÁMICO ---
+        subs_list = ["ALL"] + sorted(df_input['Subc'].unique().tolist())
         selected_sub = st.sidebar.selectbox("🎯 Target Subcontractor:", options=subs_list)
-        available_scopes = get_available_scopes_for_sub(df_input, selected_sub)
+        
+        available_scopes = get_available_scopes(df_input, selected_sub)
         
         if available_scopes:
-            location_scope = st.sidebar.radio(f"Location Scope for {selected_sub}:", options=available_scopes)
+            location_scope = st.sidebar.radio(f"Location Scope:", options=available_scopes)
             days_per_lot = st.sidebar.number_input("Days per Window", min_value=1, value=14)
             fallback_percentage = st.sidebar.slider("Fallback RT %", 0, 100, 10)
             
@@ -193,66 +180,74 @@ if uploaded_file:
             c_line = st.sidebar.checkbox("Line ID (Line)", value=False)
             db_criteria_map = [col for cond, col in zip([c_subc, c_welder, c_material, c_process, c_line], ['Subc', 'Welder1', 'MaterialType', 'WPS.1.Description', 'Line']) if cond]
 
+            # --- FILTRADO DE DATOS ANTES DEL MOTOR ---
+            df_to_process = df_input.copy()
+            if selected_sub != "ALL":
+                df_to_process = df_to_process[df_to_process['Subc'] == selected_sub]
+
             engine = RTOptimizerEngine(fallback_percentage/100, days_per_lot, db_criteria_map, location_scope)
-            audit_df, df_with_lots, diagnostic = engine.get_lot_audit(df_input)
+            audit_df, df_with_lots, diagnostic = engine.get_lot_audit(df_to_process)
 
-            tab1, tab2, tab3 = st.tabs(["📋 Work Order", "📊 Dashboard", "🛠️ Diagnostics"])
+            if audit_df.empty:
+                st.warning(f"No sampling lots found for {selected_sub} in {location_scope}.")
+            else:
+                tab1, tab2, tab3 = st.tabs(["📋 Work Order", "📊 Dashboard", "🛠️ Diagnostics"])
 
-            with tab1:
-                if audit_df.empty:
-                    st.warning("No data found for this scope with the current filters.")
-                else:
+                with tab1:
                     st.subheader(f"Inspection Plan: {selected_sub}")
-                    sub_df_lots = df_with_lots[df_with_lots['Subc'] == selected_sub]
-                    sub_audit = audit_df[audit_df['Subcontractor'] == selected_sub]
                     if st.button("🚀 Generate Plan"):
-                        result = engine.execute_optimization(sub_df_lots, sub_audit.copy())
+                        result = engine.execute_optimization(df_with_lots, audit_df.copy())
                         if not result.empty:
                             result['Plan_Date'] = datetime.now().strftime('%d/%m/%Y')
                             st.write(f"Recommended Inspections: **{len(result)}**")
                             st.dataframe(result, use_container_width=True, hide_index=True)
-                            st.download_button("📥 Download Inspection Plan", result.to_csv(sep=';', index=False).encode('utf-8-sig'), f"plan_{selected_sub}.csv", "text/csv")
+                            st.download_button("📥 Download", result.to_csv(sep=';', index=False).encode('utf-8-sig'), f"plan_{selected_sub}.csv", "text/csv")
                         else:
                             st.success("✅ Compliance achieved.")
 
-            with tab2:
-                if audit_df.empty:
-                    st.warning("No data for dashboard.")
-                else:
-                    view_option = st.selectbox("📊 View Scope:", options=["ALL"] + subs_list, index=subs_list.index(selected_sub)+1)
-                    dash_audit = audit_df.copy() if view_option == "ALL" else audit_df[audit_df['Subcontractor'] == view_option]
+                with tab2:
+                    # KPIs basados directamente en el audit_df calculado (ya filtrado por sidebar)
                     k1, k2, k3, k4, k5 = st.columns(5)
-                    total_l = len(dash_audit); open_l = len(dash_audit[dash_audit['Status'] == '🔴 OPEN'])
+                    total_l = len(audit_df); open_l = len(audit_df[audit_df['Status'] == '🔴 OPEN'])
                     k1.metric("Total Lots", total_l); k2.metric("Open Lots", open_l)
-                    k3.metric("Closed lots percentage", f"{((total_l - open_l)/total_l)*100:.1f}%" if total_l > 0 else "0%")
-                    k4.metric("Avg. Actual RT %", f"{dash_audit['Current_RT_Done_%'].mean():.1f}%" if total_l > 0 else "0%")
-                    k5.metric("Avg. Target RT %", f"{dash_audit['Current_RT_Req'].mean():.1f}%" if total_l > 0 else "0%")
+                    k3.metric("Project Compliance", f"{((total_l - open_l)/total_l)*100:.1f}%" if total_l > 0 else "0%")
+                    k4.metric("Avg. Actual RT %", f"{audit_df['Current_RT_Done_%'].mean():.1f}%" if total_l > 0 else "0%")
+                    k5.metric("Avg. Target RT %", f"{audit_df['Current_RT_Req'].mean():.1f}%" if total_l > 0 else "0%")
+                    
                     st.divider()
-                    event = st.dataframe(dash_audit, use_container_width=True, on_select="rerun", selection_mode="single-row", hide_index=True)
+                    # Filtros de tabla (ahora actúan sobre el set seleccionado en sidebar)
+                    f1, f2, f3 = st.columns(3)
+                    with f1: s_w = st.multiselect("Filter Welder", options=sorted(audit_df['Welder'].unique()))
+                    with f2: s_m = st.multiselect("Filter Material", options=sorted(audit_df['Material'].unique()))
+                    with f3: s_s = st.multiselect("Filter Status", options=['🔴 OPEN', '🟢 CLOSED'])
+
+                    f_audit = audit_df.copy()
+                    if s_w: f_audit = f_audit[f_audit['Welder'].isin(s_w)]
+                    if s_m: f_audit = f_audit[f_audit['Material'].isin(s_m)]
+                    if s_s: f_audit = f_audit[f_audit['Status'].isin(s_s)]
+
+                    event = st.dataframe(f_audit, use_container_width=True, on_select="rerun", selection_mode="single-row", hide_index=True)
                     if event.selection.rows:
-                        row_idx = event.selection.rows[0]; lot_id = dash_audit.iloc[row_idx]['Lot_ID']
+                        row_idx = event.selection.rows[0]; lot_id = f_audit.iloc[row_idx]['Lot_ID']
                         st.markdown(f"### 🔍 Detailed Explorer: Lot `{lot_id}`")
                         st.dataframe(df_with_lots[df_with_lots['Lot_ID'] == lot_id], use_container_width=True, hide_index=True)
 
-            with tab3:
-                st.subheader("Data Processing Diagnostics")
-                st.write(f"Summary for subcontractor **{selected_sub}** in scope **{location_scope}**:")
-                
-                c1, c2 = st.columns(2)
-                with c1:
-                    st.write("**Inflow:**")
-                    st.write(f"- Total joints in CSV: {diagnostic['raw_count']}")
-                    st.write(f"- Dropped (No Dateofweld): {diagnostic['dropped_no_date']}")
-                    st.write(f"- Dropped (Other Subcontractor Scope): {diagnostic['dropped_wrong_scope']}")
-                    st.write(f"- Dropped (RT_Perc = 100%): {diagnostic['dropped_mandatory']}")
-                
-                with c2:
-                    st.write("**Result:**")
-                    st.success(f"- Final joints available for sampling: {diagnostic['final_pool']}")
-                
-                st.divider()
-                st.info("💡 If you are missing joints, check the 'Dropped' reasons above. Mandatory 100% RT joints are not part of the sampling optimization.")
+                with tab3:
+                    st.subheader("Data Processing Diagnostics")
+                    st.write(f"Metrics for **{selected_sub}** in **{location_scope}** scope.")
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        st.write("**Inflow:**")
+                        st.write(f"- Total joints after subcontractor filter: {diagnostic['raw_count']}")
+                        st.write(f"- Dropped (No Dateofweld): {diagnostic['dropped_no_date']}")
+                        st.write(f"- Dropped (Other Subcontractor Scope): {diagnostic['dropped_wrong_scope']}")
+                        st.write(f"- Dropped (RT_Perc = 100%): {diagnostic['dropped_mandatory']}")
+                    with c2:
+                        st.write("**Result:**")
+                        st.success(f"- Final pool for sampling: {diagnostic['final_pool']}")
         else:
-            st.sidebar.warning("No valid locations found.")
+            st.sidebar.warning("No valid locations found in CSV.")
+
 else:
-    st.info("💡 Please upload your SQL CSV extraction to begin.")
+    st.info("💡 Please upload your SQL CSV extraction.")
+    # (Schema table code kept internal)
