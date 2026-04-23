@@ -31,38 +31,45 @@ class RTOptimizerEngine:
             current_block = 0
             
             for date in group['Dateofweld']:
-                # Si la junta está dentro de la ventana de X días desde el inicio del bloque
                 if date < start_date + pd.Timedelta(days=self.window_days):
                     block_ids.append(current_block)
                 else:
-                    # Si cae fuera, abrimos un bloque nuevo y reiniciamos el reloj
                     start_date = date
                     current_block += 1
                     block_ids.append(current_block)
             
             group['Block_ID'] = block_ids
             processed_chunks.append(group)
-            
+        
+        if not processed_chunks: return df
         return pd.concat(processed_chunks)
 
     def get_lot_audit(self, df):
-        # 1. Sanitization
+        # 1. Sanitization & Mandatory Filtering
         d = df.copy()
         d['Dateofweld'] = pd.to_datetime(d['Dateofweld'], dayfirst=True, errors='coerce')
         d['RTDate1'] = pd.to_datetime(d['RTDate1'], dayfirst=True, errors='coerce')
-        d = d.dropna(subset=['Dateofweld']) # Mandatorio para el reloj
+        
+        # REGLA: Ignorar juntas sin fecha de soldadura
+        d = d.dropna(subset=['Dateofweld'])
         
         d['RT_Perc'] = pd.to_numeric(d['RT_Perc'], errors='coerce')
+        # Fallback: 0 o Nulo se convierte en el valor del slider
         d['RT_Perc'] = d['RT_Perc'].replace(0, np.nan).fillna(self.fallback_rt_perc * 100)
         
-        # 2. Scope Filtering
+        # 2. Location Mapping
         location_map = {"WS": ["YWS", "S", "WS"], "FW": ["YFW", "FW", "F"], "PL": ["PL"]}
         allowed_values = location_map.get(self.scope, [])
-        df_filtered = d[(d['location'].isin(allowed_values)) & (d['RT_Perc'] < 100)].copy()
+        
+        # Filtrar por Ámbito y Reglas de Muestreo (Ignorar 100% mandatorio)
+        df_filtered = d[
+            (d['location'].isin(allowed_values)) & 
+            (d['RT_Perc'] < 100)
+        ].copy()
         
         if df_filtered.empty: return pd.DataFrame(), pd.DataFrame()
 
-        # 3. DYNAMIC BLOCK ASSIGNMENT (THE NEW LOGIC)
+        # 3. DYNAMIC BLOCK ASSIGNMENT
         df_with_blocks = self._assign_dynamic_blocks(df_filtered)
         
         # 4. Lot ID Building
@@ -83,7 +90,7 @@ class RTOptimizerEngine:
             Process=('WPS.1.Description', 'first'),
             Material=('MaterialType', 'first'),
             Subcontractor=('Subc', 'first'),
-            Block_Start_Date=('Dateofweld', 'min') # Para saber cuándo empezó el lote
+            Block_Start_Date=('Dateofweld', 'min')
         ).reset_index()
         
         audit['Current_RT_Done_%'] = (audit['Current_RT_Done'] / audit['Total_Joints'] * 100).round(1)
@@ -139,33 +146,40 @@ def get_available_scopes_for_sub(df, sub_name):
 st.set_page_config(page_title="RT Optimizer", layout="wide")
 st.title(":material/engineering: RT Optimizer")
 
+# 1. SIDEBAR
 st.sidebar.header(":material/settings: Configuration")
 
 uploaded_file = st.file_uploader("Upload Daily SQL Extraction (CSV)", type="csv")
 
 if uploaded_file:
     df_input = pd.read_csv(uploaded_file, sep=';')
+    
+    # NORMALIZACIÓN DE CABECERAS
     df_input.columns = df_input.columns.str.strip()
     required_cols = ['Joint_ID', 'Subc', 'Welder1', 'Line', 'location', 'MaterialType', 'WPS.1.Description', 'Dateofweld', 'RTDate1', 'RT_Perc']
     
     missing = [col for col in required_cols if not any(c.lower() == col.lower() for c in df_input.columns)]
     
     if missing:
-        st.error(f"❌ Error: Missing columns: {missing}")
+        st.error(f"❌ Error: Missing mandatory columns: {missing}")
     else:
+        # Renombrar columnas para consistencia interna
         new_cols = {col: req for col in df_input.columns for req in required_cols if col.lower() == req.lower()}
         df_input.rename(columns=new_cols, inplace=True)
         for col in df_input.select_dtypes(['object']).columns:
             df_input[col] = df_input[col].astype(str).str.strip()
 
+        # Selectores dinámicos
         subs_list = sorted(df_input['Subc'].unique())
         selected_sub = st.sidebar.selectbox("🎯 Target Subcontractor:", options=subs_list)
         available_scopes = get_available_scopes_for_sub(df_input, selected_sub)
         
         if available_scopes:
             location_scope = st.sidebar.radio(f"Location Scope for {selected_sub}:", options=available_scopes)
-            days_per_lot = st.sidebar.number_input("Days per Window", min_value=1, value=14, help="Window starts from the FIRST weld of each group.")
-            fallback_percentage = st.sidebar.slider("Fallback RT %", 0, 100, 10)
+            days_per_lot = st.sidebar.number_input("Days per Window", min_value=1, value=14, help="Window starts from the first weld of each lot.")
+            
+            fallback_percentage = st.sidebar.slider("Fallback RT %", 0, 100, 10, help="Applied to 0 or Null RT_Perc data.")
+            st.sidebar.caption("⚠️ *Fallback acts as default for missing/zero data.*")
 
             st.sidebar.divider()
             c_subc = st.sidebar.checkbox("Subcontractor (Subc)", value=True)
@@ -176,12 +190,12 @@ if uploaded_file:
 
             db_criteria_map = [col for cond, col in zip([c_subc, c_welder, c_material, c_process, c_line], ['Subc', 'Welder1', 'MaterialType', 'WPS.1.Description', 'Line']) if cond]
 
-            # RUN ENGINE WITH DYNAMIC LOGIC
+            # RUN ENGINE
             engine = RTOptimizerEngine(fallback_percentage/100, days_per_lot, db_criteria_map, location_scope)
             audit_df, df_with_lots = engine.get_lot_audit(df_input)
 
             if audit_df.empty:
-                st.warning(f"⚠️ No juntas found for scope '{location_scope}'.")
+                st.warning(f"⚠️ No juntas found for scope '{location_scope}' (Check dates and location values).")
             else:
                 tab1, tab2 = st.tabs([":material/assignment: Work Order", ":material/dashboard: Dashboard"])
 
@@ -198,7 +212,7 @@ if uploaded_file:
                             display_cols = ['Joint_ID', 'Plan_Date', 'Lot_ID', 'Welder1', 'Line', 'MaterialType', 'WPS.1.Description', 'Dateofweld', 'RT_Perc']
                             st.dataframe(result[[c for c in display_cols if c in result.columns]], use_container_width=True, hide_index=True)
                             csv_data = result.to_csv(sep=';', index=False).encode('utf-8-sig')
-                            st.download_button("📥 Download Plan (CSV)", csv_data, f"plan_{selected_sub}_{datetime.now().strftime('%Y%m%d')}.csv", "text/csv")
+                            st.download_button("📥 Download Plan (CSV)", csv_data, f"plan_{selected_sub}.csv", "text/csv")
                         else:
                             st.success("✅ Compliance achieved.")
 
@@ -239,10 +253,19 @@ if uploaded_file:
                         st.markdown(f"### 🔍 Detailed Explorer: Lot `{lot_id}`")
                         joints_in_lot = df_with_lots[df_with_lots['Lot_ID'] == lot_id]
                         st.dataframe(joints_in_lot[['Joint_ID', 'Subc', 'Welder1', 'Line', 'Dateofweld', 'RTDate1', 'RT_Perc']], use_container_width=True, hide_index=True)
-                    else:
-                        st.caption("💡 Select a row to see individual joints.")
         else:
-            st.sidebar.warning("No valid locations found.")
+            st.sidebar.warning("No valid locations found for this Subcontractor.")
 else:
-    st.info("💡 **Awaiting Data.** Please upload your SQL CSV extraction.")
-    # (Schema table display omitted here for brevity, but kept in code logic)
+    st.info("💡 **Awaiting Data.** Please upload your SQL CSV extraction to begin.")
+    st.markdown("### Required CSV Data Structure")
+    example_schema = {
+        'Mandatory Column Name': ['Joint_ID', 'Subc', 'Welder1', 'Line', 'location', 'MaterialType', 'WPS.1.Description', 'Dateofweld', 'RTDate1', 'RT_Perc'],
+        'Description': ['Unique ID', 'Subcontractor Name', 'Welder ID', 'Line Number', 'Location Type (YWS, FW, etc.)', 'Material Group', 'Welding Process', 'DD/MM/YYYY', 'Empty if pending', 'Target %']
+    }
+    st.table(pd.DataFrame(example_schema))
+    st.markdown("""
+    **Processing Rules:**
+    *   **Dynamic Windows:** The 14-day period starts from the *first* weld date of each specific group.
+    *   **Max Rule:** If a lot has mixed requirements, the highest value is applied.
+    *   **Exclusions:** Juntas without `Dateofweld` are automatically ignored.
+    """)
