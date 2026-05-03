@@ -4,6 +4,15 @@ import numpy as np
 import joblib
 import os
 from datetime import datetime
+import sklearn.compose
+
+# --- PARCHE NINJA DE COMPATIBILIDAD IA ---
+# Este bloque engaña a scikit-learn para que encuentre la pieza que le falta
+if not hasattr(sklearn.compose._column_transformer, '_RemainderColsList'):
+    class _RemainderColsList(list):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+    sklearn.compose._column_transformer._RemainderColsList = _RemainderColsList
 
 # --- OPTIMIZATION ENGINE ---
 class RTOptimizerEngine:
