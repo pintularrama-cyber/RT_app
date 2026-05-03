@@ -1,9 +1,7 @@
 pandas
 numpy
 streamlit
-xgboost
-scikit-learn==1.2.2
-matplotlib
-seaborn
 joblib
-category_encoders
+xgboost
+scikit-learn
+category-encoders
