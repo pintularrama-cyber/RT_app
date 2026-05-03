@@ -228,4 +228,4 @@ if uploaded_file:
                 detail_cols = ['Joint_ID', 'Inspection_Type', 'Line', 'Dateofweld', 'RTDate1', 'RT1rej', 'RT2Date1', 'RT2rej', 'RT_Perc']
                 st.dataframe(df_with_lots[df_with_lots['Lot_ID'] == lot_id][detail_cols], use_container_width=True, hide_index=True)
 else:
-    st.info("💡 Please upload your SQL CSV extraction.")
+    st.info("💡 Please upload your CSV")
