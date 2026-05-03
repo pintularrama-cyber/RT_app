@@ -2,7 +2,7 @@ pandas
 numpy
 streamlit
 xgboost
-scikit-learn
+scikit-learn==1.8.0
 matplotlib
 seaborn
 joblib
