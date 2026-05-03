@@ -6,3 +6,4 @@ scikit-learn
 matplotlib
 seaborn
 joblib
+category_encoders
