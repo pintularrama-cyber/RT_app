@@ -3,16 +3,16 @@ import pandas as pd
 import numpy as np
 import joblib
 import os
-from datetime import datetime
 import sklearn.compose
+from datetime import datetime
 
 # --- PARCHE NINJA DE COMPATIBILIDAD IA ---
-# Este bloque engaña a scikit-learn para que encuentre la pieza que le falta
 if not hasattr(sklearn.compose._column_transformer, '_RemainderColsList'):
     class _RemainderColsList(list):
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs)
     sklearn.compose._column_transformer._RemainderColsList = _RemainderColsList
+# -----------------------------------------
 
 # --- OPTIMIZATION ENGINE ---
 class RTOptimizerEngine:
@@ -21,24 +21,20 @@ class RTOptimizerEngine:
         self.window_days = window_days
         self.lot_criteria = lot_criteria 
         self.scope = selected_location_scope
-        
-        # CARGA DEL PIPELINE DE IA (XGBoost + Preprocessing)
         self.model_pipeline = None
+        
         if model_path and os.path.exists(model_path):
             try:
                 self.model_pipeline = joblib.load(model_path)
+                st.sidebar.success("✅ AI Engine Active")
             except Exception as e:
-                st.sidebar.error(f"⚠️ Error loading AI model: {e}")
-        else:
-            st.sidebar.warning("🔍 AI Model file not found. Running in standard mode.")
+                st.sidebar.warning(f"⚠️ AI model bypass: {e}")
 
     def _assign_dynamic_blocks(self, df):
-        """Asignación de ventanas móviles de 14 días (Lógica estable)."""
         if df.empty: return df
         df = df.sort_values('Dateofweld')
         groups = df.groupby(self.lot_criteria)
         processed_chunks = []
-
         for _, group in groups:
             group = group.copy()
             block_ids = []
@@ -57,36 +53,30 @@ class RTOptimizerEngine:
         return pd.concat(processed_chunks) if processed_chunks else df
 
     def get_lot_audit(self, df):
-        # 1. Saneamiento Profundo
         d = df.copy()
         d['Dateofweld'] = pd.to_datetime(d['Dateofweld'], dayfirst=True, errors='coerce')
         d['RTDate1'] = pd.to_datetime(d['RTDate1'], dayfirst=True, errors='coerce')
         d['RT2Date1'] = pd.to_datetime(d.get('RT2Date1', None), dayfirst=True, errors='coerce')
-        
-        # Filtro 1: Ignorar sin fecha de soldadura
         d = d.dropna(subset=['Dateofweld'])
-        # Filtro 2: Excluir Plástico
         if 'MaterialType' in d.columns:
             d = d[d['MaterialType'].str.upper() != 'PLASTIC']
         
         if d.empty: return pd.DataFrame(), pd.DataFrame()
         
-        # Saneamiento de Requisitos y Factores IA
         d['RT_Perc'] = pd.to_numeric(d['RT_Perc'], errors='coerce').replace(0, np.nan).fillna(self.fallback_rt_perc * 100)
         d['Jointsize'] = pd.to_numeric(d.get('Jointsize', 0), errors='coerce').fillna(0)
         d['Thickness'] = pd.to_numeric(d.get('Thickness', 0), errors='coerce').fillna(0)
         
-        # Saneamiento RT1rej (Fallo original)
-        if 'RT1rej' not in d.columns: d['RT1rej'] = False
-        else:
-            d['RT1rej'] = d['RT1rej'].astype(str).str.upper().str.strip()
-            d['RT1rej'] = d['RT1rej'].map({'TRUE': True, 'FALSE': False, '1': True, '0': False, 'NAN': False}).fillna(False)
+        for col in ['RT1rej', 'RT2rej']:
+            if col in d.columns:
+                d[col] = d[col].astype(str).str.upper().str.strip()
+                d[col] = d[col].map({'TRUE': True, 'FALSE': False, '1': True, '0': False, 'NAN': False}).fillna(False)
+            else: d[col] = False
 
-        # 2. Filtrado por Ubicación (Scope)
+        location_map = {"WS": ["YWS", "S", "WS"], "FW": ["YFW", "FW", "F"], "PL": ["PL"]}
         if self.scope == "ALL":
             df_filtered = d[d['RT_Perc'] < 100].copy()
         else:
-            location_map = {"WS": ["YWS", "S", "WS"], "FW": ["YFW", "FW", "F"], "PL": ["PL"]}
             allowed_values = location_map.get(self.scope, [])
             df_filtered = d[(d['location'].isin(allowed_values)) & (d['RT_Perc'] < 100)].copy()
         
@@ -95,7 +85,6 @@ class RTOptimizerEngine:
         # --- INFERENCIA NINJA (IA) ---
         if self.model_pipeline:
             try:
-                # Variables que espera tu Pipeline
                 X = df_filtered[['Jointsize', 'Subc', 'MaterialType', 'WPS.1.Description', 'Thickness']]
                 df_filtered['AI_Fail_Prob'] = self.model_pipeline.predict_proba(X)[:, 1]
             except:
@@ -103,13 +92,15 @@ class RTOptimizerEngine:
         else:
             df_filtered['AI_Fail_Prob'] = 0.0
 
-        def get_risk_label(p):
-            if p > 0.75: return "🔴 High"
-            if p > 0.30: return "🟡 Medium"
-            return "🟢 Low"
-        df_filtered['Risk_Level'] = df_filtered['AI_Fail_Prob'].apply(get_risk_label)
+        # --- MEJORA VISUAL: Semáforo + Número ---
+        def format_risk_label(prob):
+            percentage = prob * 100
+            if prob > 0.75: return f"🔴 High ({percentage:.1f}%)"
+            if prob > 0.30: return f"🟡 Med ({percentage:.1f}%)"
+            return f"🟢 Low ({percentage:.1f}%)"
+        
+        df_filtered['Risk_Level'] = df_filtered['AI_Fail_Prob'].apply(format_risk_label)
 
-        # 3. Asignación de Lotes
         df_with_blocks = self._assign_dynamic_blocks(df_filtered)
         
         def build_lot_id(row):
@@ -120,7 +111,6 @@ class RTOptimizerEngine:
 
         df_with_blocks['Lot_ID'] = df_with_blocks.apply(build_lot_id, axis=1)
 
-        # 4. Auditoría con Lógica Penalty
         audit = df_with_blocks.groupby('Lot_ID').agg(
             Total_Joints=('Joint_ID', 'count'), 
             RT1_Done_Count=('RTDate1', 'count'),
@@ -148,7 +138,7 @@ class RTOptimizerEngine:
         audit['Deficit'] = (audit['Required'] - audit['Current_RT_Done']).clip(lower=0)
         audit['Status'] = np.where((audit['Deficit'] == 0) & (audit['RT2_Pending_Count'] == 0), '🟢 CLOSED', '🔴 OPEN')
         
-        # Etiquetado para detalle
+        rejects_map = audit.set_index('Lot_ID')['RT1_Rejects'].to_dict()
         def label_joint_type(row):
             lot_data = audit[audit['Lot_ID'] == row['Lot_ID']]
             n_rej = lot_data['RT1_Rejects'].values[0] if not lot_data.empty else 0
@@ -160,12 +150,9 @@ class RTOptimizerEngine:
             return "Standard Sampling"
 
         df_with_blocks['Inspection_Type'] = df_with_blocks.apply(label_joint_type, axis=1)
-
-        cols_order = ['Status', 'Lot_ID', 'Subcontractor', 'Total_Joints', 'Current_RT_Done', 'Current_RT_Done_%', 
-                      'RT1_Rejects', 'RT2_Pending_Count', 'Current_RT_Req', 'Required', 'Deficit', 'Welder', 'Process', 'Material', 'location', 'Block_Start_Date']
         
         audit.rename(columns={'RT2_Pending_Count': 'RT2_Pending'}, inplace=True)
-        return audit[[c for c in cols_order if c in audit.columns]], df_with_blocks
+        return audit, df_with_blocks
 
     def execute_optimization(self, df_audit_base, audit):
         if audit.empty: return pd.DataFrame()
@@ -177,8 +164,7 @@ class RTOptimizerEngine:
             def calc_impact(row):
                 l_id = row['Lot_ID']
                 impact = 1.0 if debts.get(l_id, 0) > 0 else 0.0
-                # IA NINJA: El riesgo inclina la balanza
-                impact += row.get('AI_Fail_Prob', 0.0)
+                impact += row.get('AI_Fail_Prob', 0.0) # IA como desempate
                 if 'WPS.1.Description' in self.lot_criteria and 'GTAW+SMAW' in l_id:
                     target_gtaw = l_id.replace('GTAW+SMAW', 'GTAW')
                     if debts.get(target_gtaw, 0) > 0: impact += 0.5 
@@ -196,7 +182,7 @@ class RTOptimizerEngine:
             candidates = candidates.drop(best_idx)
         return pd.DataFrame(inspection_plan)
 
-# --- UI UTILS ---
+# --- UTILS ---
 def get_available_scopes(df, sub):
     location_map = {"WS": ["YWS", "S", "WS"], "FW": ["YFW", "FW", "F"], "PL": ["PL"]}
     locs = df['location'].unique() if sub == "ALL" else df[df['Subc'] == sub]['location'].unique()
@@ -205,15 +191,14 @@ def get_available_scopes(df, sub):
         if any(loc in locs for loc in vals): available.append(scope)
     return ["ALL"] + available if len(available) > 1 else available
 
-# --- APP START ---
+# --- UI ---
 st.set_page_config(page_title="RT Optimizer", layout="wide", page_icon="🏗️")
-st.title(":material/engineering: RT Optimizer | AI Engine")
+st.title(":material/engineering: RT Optimizer | AI-Driven")
 
-# RUTA DINÁMICA AL MODELO
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.path.join(BASE_DIR, 'modelo_WS_xgboost.joblib')
 
-uploaded_file = st.file_uploader("Upload SQL CSV Extraction (CSV)", type="csv")
+uploaded_file = st.file_uploader("Upload Daily SQL Extraction (CSV)", type="csv")
 
 if uploaded_file:
     df_raw = pd.read_csv(uploaded_file, sep=';', encoding='utf-8-sig')
@@ -226,19 +211,16 @@ if uploaded_file:
     df_raw.rename(columns=new_cols, inplace=True)
     for col in df_raw.select_dtypes(['object']).columns: df_raw[col] = df_raw[col].astype(str).str.strip()
 
-    # SIDEBAR
-    st.sidebar.header("⚙️ Configuration")
     subs_list = ["ALL"] + sorted(df_raw['Subc'].unique().tolist())
     selected_sub = st.sidebar.selectbox("🎯 Target Subcontractor:", options=subs_list)
-    available_scopes = get_available_scopes(df_raw, selected_sub)
-    location_scope = st.sidebar.radio("Location Scope:", options=available_scopes, index=0)
+    scopes = get_available_scopes(df_raw, selected_sub)
+    location_scope = st.sidebar.radio("Location Scope:", options=scopes, index=0)
     days_per_lot = st.sidebar.number_input("Days per Window", min_value=1, value=14)
     fallback_perc = st.sidebar.slider("Fallback RT %", 0, 100, 10)
 
     st.sidebar.divider()
     db_criteria = [col for cond, col in zip([st.sidebar.checkbox("Subcontractor", value=True), st.sidebar.checkbox("Welder", value=True), st.sidebar.checkbox("Material Type", value=True), st.sidebar.checkbox("Welding Process", value=True), st.sidebar.checkbox("Line ID", value=False)], ['Subc', 'Welder1', 'MaterialType', 'WPS.1.Description', 'Line']) if cond]
 
-    # --- ENGINE ---
     engine = RTOptimizerEngine(fallback_perc/100, days_per_lot, db_criteria, location_scope, model_path=MODEL_PATH)
     
     df_to_process = df_raw.copy()
@@ -251,18 +233,17 @@ if uploaded_file:
     else:
         tab1, tab2 = st.tabs([":material/assignment: Work Order", ":material/dashboard: Dashboard"])
         with tab1:
-            if st.button("🚀 Generate Plan (Compliance + AI Risk)"):
+            if st.button("🚀 Generate Optimized Plan (Compliance + AI Risk)"):
                 result = engine.execute_optimization(df_with_lots, audit_df.copy())
                 if not result.empty:
                     result['Plan_Date'] = datetime.now().strftime('%d/%m/%Y')
-                    st.write(f"Recommended Inspections: **{len(result)}**")
                     display_cols = ['Joint_ID', 'Risk_Level', 'Inspection_Reason', 'Lot_ID', 'Welder1', 'Line', 'MaterialType', 'WPS.1.Description']
                     st.dataframe(result[[c for c in display_cols if c in result.columns]], use_container_width=True, hide_index=True)
                     st.download_button("📥 Download", result.to_csv(sep=';', index=False).encode('utf-8-sig'), f"plan_v2_{selected_sub}.csv", "text/csv")
                 else: st.success("✅ Compliance achieved.")
 
         with tab2:
-            st.subheader(f"Dashboard: {selected_sub}")
+            st.subheader(f"Status: {selected_sub}")
             k1, k2, k3, k4, k5 = st.columns(5)
             total_l = len(audit_df); open_l = len(audit_df[audit_df['Status'] == '🔴 OPEN'])
             k1.metric("Total Lots", total_l); k2.metric("Open Lots", open_l)
@@ -287,4 +268,4 @@ if uploaded_file:
                 det_cols = ['Joint_ID', 'Risk_Level', 'Inspection_Type', 'Line', 'Jointsize', 'Thickness', 'Dateofweld', 'RTDate1', 'RT2Date1', 'RT1rej']
                 st.dataframe(df_with_lots[df_with_lots['Lot_ID'] == lot_id][[c for c in det_cols if c in df_with_lots.columns]], use_container_width=True, hide_index=True)
 else:
-    st.info("💡 Please upload your CSV extraction.")
+    st.info("💡 Please upload your SQL CSV extraction.")
