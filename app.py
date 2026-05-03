@@ -94,19 +94,13 @@ class RTOptimizerEngine:
         audit['Deficit'] = (audit['Required'] - audit['Current_RT_Done']).clip(lower=0)
         audit['Status'] = np.where((audit['Deficit'] == 0) & (audit['RT2_Pending_Count'] == 0), '🟢 CLOSED', '🔴 OPEN')
         
-        # --- LÓGICA DE ETIQUETADO CORREGIDA ---
         rejects_map = audit.set_index('Lot_ID')['RT1_Rejects'].to_dict()
         def label_joint_type(row):
             l_id = row['Lot_ID']
             n_rej = rejects_map.get(l_id, 0)
-            
-            # 1. Prioridad: ¿Se ha reparado ya?
             if row['RT1rej'] and pd.notna(row['RT2Date1']): return "🛠️ REPAIR DONE (RT2)"
-            # 2. ¿Está rechazada y pendiente?
             if row['RT1rej']: return "❌ REJECTED"
-            # 3. ¿Es una estándar completada?
             if pd.notna(row['RTDate1']): return "✅ STANDARD (OK)"
-            # 4. Pendientes (Penalty o Full Audit)
             if n_rej == 1: return "🚨 PENALTY (Tracer)"
             if n_rej > 1: return "🧨 FULL AUDIT (100%)"
             return "Standard Sampling"
@@ -163,11 +157,19 @@ uploaded_file = st.file_uploader("Upload Daily SQL Extraction (CSV)", type="csv"
 if uploaded_file:
     df_raw = pd.read_csv(uploaded_file, sep=';', encoding='utf-8-sig')
     df_raw.columns = df_raw.columns.str.strip()
+    
+    # 1. Normalización de cabeceras
     required_cols = ['Joint_ID', 'Subc', 'Welder1', 'Line', 'location', 'MaterialType', 'WPS.1.Description', 'Dateofweld', 'RTDate1', 'RT_Perc', 'RT1rej', 'RT2Date1', 'RT2rej']
     new_cols = {col: req for col in df_raw.columns for req in required_cols if col.lower() == req.lower()}
     df_raw.rename(columns=new_cols, inplace=True)
+    
+    # 2. LIMPIEZA Y FILTRADO AUTOMÁTICO DE PLÁSTICO
     for col in df_raw.select_dtypes(['object']).columns: df_raw[col] = df_raw[col].astype(str).str.strip()
+    
+    # Excluimos MaterialType == PLASTIC
+    df_raw = df_raw[df_raw['MaterialType'].str.upper() != 'PLASTIC'].copy()
 
+    # Sidebar selectors
     subs_list = ["ALL"] + sorted(df_raw['Subc'].unique().tolist())
     selected_sub = st.sidebar.selectbox("🎯 Target Subcontractor:", options=subs_list)
     scopes = get_available_scopes(df_raw, selected_sub)
@@ -185,7 +187,7 @@ if uploaded_file:
     audit_df, df_with_lots = engine.get_lot_audit(df_to_process)
 
     if audit_df.empty:
-        st.warning("No data found.")
+        st.warning("No data found for this selection.")
     else:
         tab1, tab2 = st.tabs([":material/assignment: Work Order", ":material/dashboard: Dashboard"])
         with tab1:
@@ -223,7 +225,6 @@ if uploaded_file:
             if event.selection.rows:
                 row_idx = event.selection.rows[0]; lot_id = f_audit.iloc[row_idx]['Lot_ID']
                 st.markdown(f"### 🔍 Detailed Explorer: Lot `{lot_id}`")
-                # --- AQUÍ SE INCLUYE RT2rej EN EL DETALLE ---
                 detail_cols = ['Joint_ID', 'Inspection_Type', 'Line', 'Dateofweld', 'RTDate1', 'RT1rej', 'RT2Date1', 'RT2rej', 'RT_Perc']
                 st.dataframe(df_with_lots[df_with_lots['Lot_ID'] == lot_id][detail_cols], use_container_width=True, hide_index=True)
 else:
