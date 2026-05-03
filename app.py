@@ -264,7 +264,7 @@ if uploaded_file:
     else:
         tab1, tab2 = st.tabs([":material/assignment: Work Order", ":material/dashboard: Dashboard"])
         with tab1:
-            if st.button("🚀 Generate Plan"):
+            if st.button("🚀 Generate Inspection Plan"):
                 result = engine.execute_optimization(df_with_lots, audit_df.copy())
                 if not result.empty:
                     result['Plan_Date'] = datetime.now().strftime('%d/%m/%Y')
