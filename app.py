@@ -13,7 +13,10 @@ class RTOptimizerEngine:
 
     def _assign_dynamic_blocks(self, df):
         if df.empty: return df
+        # 1. Ordenamos por fecha para que el cronómetro dinámico sea exacto
         df = df.sort_values('Dateofweld')
+        
+        # 2. Agrupamos por los criterios del sidebar para crear ventanas independientes
         groups = df.groupby(self.lot_criteria)
         processed_chunks = []
 
@@ -38,35 +41,38 @@ class RTOptimizerEngine:
         return pd.concat(processed_chunks) if processed_chunks else df
 
     def get_lot_audit(self, df):
+        # Saneamiento de datos inicial
         d = df.copy()
-        # Saneamiento de fechas
-        d['Dateofweld'] = pd.to_datetime(d['Dateofweld'], dayfirst=True, errors='coerce')
-        d['RTDate1'] = pd.to_datetime(d['RTDate1'], dayfirst=True, errors='coerce')
-        d['RT2Date1'] = pd.to_datetime(d.get('RT2Date1', None), dayfirst=True, errors='coerce')
+        d['Dateofweld'] = pd.to_datetime(d['Dateofweld'], errors='coerce')
+        d['RTDate1'] = pd.to_datetime(d['RTDate1'], errors='coerce')
+        d['RT2Date1'] = pd.to_datetime(d.get('RT2Date1', None), errors='coerce')
         
+        # REGLA: Ignorar Dateofweld vacío
         d = d.dropna(subset=['Dateofweld'])
         if d.empty: return pd.DataFrame(), pd.DataFrame()
         
         d['RT_Perc'] = pd.to_numeric(d['RT_Perc'], errors='coerce').replace(0, np.nan).fillna(self.fallback_rt_perc * 100)
         
-        # Saneamiento de RT1rej
+        # Saneamiento RT1rej
         if 'RT1rej' not in d.columns: d['RT1rej'] = False
         else:
             d['RT1rej'] = d['RT1rej'].astype(str).str.upper().str.strip()
             d['RT1rej'] = d['RT1rej'].map({'TRUE': True, 'FALSE': False, '1': True, '0': False, 'NAN': False}).fillna(False)
 
-        # Filtro de Ubicación
-        location_map = {"WS": ["YWS", "S", "WS"], "FW": ["YFW", "FW", "F"], "PL": ["PL"]}
+        # Filtro de Ubicación (Scope)
         if self.scope == "ALL":
             df_filtered = d[d['RT_Perc'] < 100].copy()
         else:
+            location_map = {"WS": ["YWS", "S", "WS"], "FW": ["YFW", "FW", "F"], "PL": ["PL"]}
             allowed_values = location_map.get(self.scope, [])
             df_filtered = d[(d['location'].isin(allowed_values)) & (d['RT_Perc'] < 100)].copy()
         
         if df_filtered.empty: return pd.DataFrame(), pd.DataFrame()
 
+        # Asignación de Bloques
         df_with_blocks = self._assign_dynamic_blocks(df_filtered)
         
+        # Construcción del ID de Lote (Exactamente como la versión de 138 lotes)
         def build_lot_id(row):
             parts = [str(row['Block_ID'])]
             for criterion in self.lot_criteria:
@@ -75,12 +81,12 @@ class RTOptimizerEngine:
 
         df_with_blocks['Lot_ID'] = df_with_blocks.apply(build_lot_id, axis=1)
 
-        # Auditoría con Lógica Penalty
+        # Auditoría con Lógica Penalty ASME
         audit = df_with_blocks.groupby('Lot_ID').agg(
             Total_Joints=('Joint_ID', 'count'), 
             RT1_Done_Count=('RTDate1', 'count'),
             RT1_Rejects=('RT1rej', 'sum'),
-            RT2_Pending=('RT1rej', lambda x: ((x == True) & (df_with_blocks.loc[x.index, 'RT2Date1'].isna())).sum()),
+            RT2_Pending_Count=('RT1rej', lambda x: ((x == True) & (df_with_blocks.loc[x.index, 'RT2Date1'].isna())).sum()),
             Current_RT_Req=('RT_Perc', 'max'),    
             Welder=('Welder1', 'first'),
             Process=('WPS.1.Description', 'first'),
@@ -95,18 +101,21 @@ class RTOptimizerEngine:
         def calculate_required(row):
             base_req = np.ceil(row['Total_Joints'] * (row['Current_RT_Req'] / 100))
             if row['RT1_Rejects'] == 1: return min(row['Total_Joints'], base_req + 2)
-            elif row['RT1_Rejects'] > 1: return row['Total_Joints']
+            elif row['RT1_Rejects'] > 1: return row['Total_Joints'] # Fallo de penalty = 100%
             return base_req
 
         audit['Required'] = audit.apply(calculate_required, axis=1).astype(int)
         audit['Current_RT_Done_%'] = (audit['Current_RT_Done'] / audit['Total_Joints'] * 100).round(1)
         audit['Deficit'] = (audit['Required'] - audit['Current_RT_Done']).clip(lower=0)
-        audit['Status'] = np.where((audit['Deficit'] == 0) & (audit['RT2_Pending'] == 0), '🟢 CLOSED', '🔴 OPEN')
         
+        # El lote solo se cierra si no debe placas Y no hay reparaciones físicas pendientes
+        audit['Status'] = np.where((audit['Deficit'] == 0) & (audit['RT2_Pending_Count'] == 0), '🟢 CLOSED', '🔴 OPEN')
+        
+        # Etiquetado para detalle
         def label_joint_type(row):
-            lot_row = audit[audit['Lot_ID'] == row['Lot_ID']]
-            if lot_row.empty: return "Standard"
-            n_rej = lot_row['RT1_Rejects'].values[0]
+            lot_data = audit[audit['Lot_ID'] == row['Lot_ID']]
+            if lot_data.empty: return "Standard"
+            n_rej = lot_data['RT1_Rejects'].values[0]
             if row['RT1rej']: return "❌ REJECTED"
             if pd.notna(row['RT2Date1']): return "🛠️ REPAIR DONE (RT2)"
             if pd.notna(row['RTDate1']): return "✅ STANDARD (OK)"
@@ -117,7 +126,7 @@ class RTOptimizerEngine:
         df_with_blocks['Inspection_Type'] = df_with_blocks.apply(label_joint_type, axis=1)
 
         cols_order = ['Status', 'Lot_ID', 'Subcontractor', 'Total_Joints', 'Current_RT_Done', 'Current_RT_Done_%', 
-                      'RT1_Rejects', 'RT2_Pending', 'Current_RT_Req', 'Required', 'Deficit', 'Welder', 'Process', 'Material', 'location', 'Block_Start_Date']
+                      'RT1_Rejects', 'RT2_Pending_Count', 'Current_RT_Req', 'Required', 'Deficit', 'Welder', 'Process', 'Material', 'location', 'Block_Start_Date']
         return audit[cols_order], df_with_blocks
 
     def execute_optimization(self, df_audit_base, audit):
@@ -147,18 +156,20 @@ class RTOptimizerEngine:
         return pd.DataFrame(inspection_plan)
 
 # --- UTILS ---
-def get_available_scopes_for_sub(df, subcontractor):
+def get_available_scopes(df, subcontractor):
     location_map = {"WS": ["YWS", "S", "WS"], "FW": ["YFW", "FW", "F"], "PL": ["PL"]}
-    locs_present = df['location'].unique() if subcontractor == "ALL" else df[df['Subc'] == subcontractor]['location'].unique()
+    if subcontractor == "ALL": locs = df['location'].unique()
+    else: locs = df[df['Subc'] == subcontractor]['location'].unique()
     available = []
-    for scope, values in location_map.items():
-        if any(v in locs_present for v in values): available.append(scope)
+    for scope, vals in location_map.items():
+        if any(loc in locs for loc in vals): available.append(scope)
     return ["ALL"] + available if len(available) > 1 else available
 
 # --- UI ---
 st.set_page_config(page_title="RT Optimizer", layout="wide", page_icon="🏗️")
 st.title(":material/engineering: RT Optimizer")
 
+st.sidebar.header("⚙️ Configuration")
 uploaded_file = st.file_uploader("Upload Daily SQL Extraction (CSV)", type="csv")
 
 if uploaded_file:
@@ -169,23 +180,29 @@ if uploaded_file:
     df_raw.rename(columns=new_cols, inplace=True)
     for col in df_raw.select_dtypes(['object']).columns: df_raw[col] = df_raw[col].astype(str).str.strip()
 
+    # SIDEBAR DINÁMICO
     subs_list = ["ALL"] + sorted(df_raw['Subc'].unique().tolist())
-    selected_sub_sidebar = st.sidebar.selectbox("🎯 Target Subcontractor:", options=subs_list)
+    selected_sub = st.sidebar.selectbox("🎯 Target Subcontractor:", options=subs_list)
     
-    # Nombre de función corregido aquí:
-    available_scopes = get_available_scopes_for_sub(df_raw, selected_sub_sidebar)
+    scopes = get_available_scopes(df_raw, selected_sub)
+    location_scope = st.sidebar.radio("Location Scope:", options=scopes, index=0)
     
-    location_scope = st.sidebar.radio("Location Scope:", options=available_scopes, index=0)
     days_per_lot = st.sidebar.number_input("Days per Window", min_value=1, value=14)
     fallback_perc = st.sidebar.slider("Fallback RT %", 0, 100, 10)
 
     st.sidebar.divider()
-    db_criteria = [col for cond, col in zip([st.sidebar.checkbox("Subcontractor (Subc)", value=True), st.sidebar.checkbox("Welder ID (Welder1)", value=True), st.sidebar.checkbox("Material Type", value=True), st.sidebar.checkbox("Welding Process", value=True), st.sidebar.checkbox("Line ID", value=False)], ['Subc', 'Welder1', 'MaterialType', 'WPS.1.Description', 'Line']) if cond]
+    c_subc = st.sidebar.checkbox("Subcontractor (Subc)", value=True)
+    c_weld = st.sidebar.checkbox("Welder ID (Welder1)", value=True)
+    c_mat = st.sidebar.checkbox("Material Type", value=True)
+    c_proc = st.sidebar.checkbox("Welding Process", value=True)
+    c_line = st.sidebar.checkbox("Line ID", value=False)
+    db_criteria = [col for cond, col in zip([c_subc, c_weld, c_mat, c_proc, c_line], ['Subc', 'Welder1', 'MaterialType', 'WPS.1.Description', 'Line']) if cond]
 
+    # FILTRADO
     df_to_process = df_raw.copy()
-    if selected_sub_sidebar != "ALL":
-        df_to_process = df_raw[df_raw['Subc'] == selected_sub_sidebar].copy()
+    if selected_sub != "ALL": df_to_process = df_raw[df_raw['Subc'] == selected_sub].copy()
 
+    # MOTOR
     engine = RTOptimizerEngine(fallback_perc/100, days_per_lot, db_criteria, location_scope)
     audit_df, df_with_lots = engine.get_lot_audit(df_to_process)
 
@@ -194,18 +211,18 @@ if uploaded_file:
     else:
         tab1, tab2 = st.tabs([":material/assignment: Work Order", ":material/dashboard: Dashboard"])
         with tab1:
-            if st.button("🚀 Generate Optimized Plan"):
+            if st.button("🚀 Generate Plan"):
                 result = engine.execute_optimization(df_with_lots, audit_df.copy())
                 if not result.empty:
                     result['Plan_Date'] = datetime.now().strftime('%d/%m/%Y')
                     st.write(f"Recommended Inspections: **{len(result)}**")
                     display_cols = ['Joint_ID', 'Inspection_Reason', 'Lot_ID', 'Welder1', 'Line', 'MaterialType', 'WPS.1.Description', 'Dateofweld']
                     st.dataframe(result[[c for c in display_cols if c in result.columns]], use_container_width=True, hide_index=True)
-                    st.download_button("📥 Download Plan", result.to_csv(sep=';', index=False).encode('utf-8-sig'), f"plan_{selected_sub_sidebar}.csv", "text/csv")
+                    st.download_button("📥 Download", result.to_csv(sep=';', index=False).encode('utf-8-sig'), f"plan_{selected_sub}.csv", "text/csv")
                 else: st.success("✅ Compliance achieved.")
 
         with tab2:
-            st.subheader(f"Dashboard: {selected_sub_sidebar}")
+            st.subheader(f"Dashboard: {selected_sub} | {location_scope}")
             k1, k2, k3, k4, k5 = st.columns(5)
             total_l = len(audit_df); open_l = len(audit_df[audit_df['Status'] == '🔴 OPEN'])
             k1.metric("Total Lots", total_l); k2.metric("Open Lots", open_l)
@@ -219,6 +236,7 @@ if uploaded_file:
             with f2: s_w = st.multiselect("Filter Welder", options=sorted(audit_df['Welder'].unique()))
             with f3: s_m = st.multiselect("Filter Material", options=sorted(audit_df['Material'].unique()))
             with f4: s_s = st.multiselect("Filter Status", options=['🔴 OPEN', '🟢 CLOSED'])
+            
             f_audit = audit_df.copy()
             if s_lid: f_audit = f_audit[f_audit['Lot_ID'].isin(s_lid)]
             if s_w: f_audit = f_audit[f_audit['Welder'].isin(s_w)]
