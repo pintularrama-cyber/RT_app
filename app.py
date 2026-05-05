@@ -17,7 +17,7 @@ if not hasattr(sklearn.compose._column_transformer, '_RemainderColsList'):
 if not hasattr(sklearn.impute.SimpleImputer, '_fill_dtype'):
     setattr(sklearn.impute.SimpleImputer, '_fill_dtype', float)
 
-# --- 2. CONFIGURACIÓN GLOBAL ---
+# --- 2. CONFIGURACIÓN DE COLUMNAS MAESTRAS ---
 REQUIRED_COLS = [
     'Joint_ID', 'Subc', 'Welder1', 'Line', 'location', 
     'MaterialType', 'WPS.1.Description', 'Dateofweld', 
@@ -35,16 +35,25 @@ def load_ai_model(path):
 
 @st.cache_data
 def load_and_preprocess_data(file):
+    # utf-8-sig limpia el símbolo invisible (BOM) del Joint_ID
     d = pd.read_csv(file, sep=';', encoding='utf-8-sig')
     d.columns = d.columns.str.strip()
+    
+    # Normalización de cabeceras (Case-insensitive)
+    new_cols = {}
+    for col in d.columns:
+        for req in REQUIRED_COLS:
+            if col.lower() == req.lower():
+                new_cols[col] = req
+    d.rename(columns=new_cols, inplace=True)
+    
+    # Limpieza de textos y tipos
     for col in d.select_dtypes(['object']).columns:
         d[col] = d[col].astype(str).str.strip()
     
-    # Filtro Industrial: Solo juntas soldadas
-    d['Dateofweld'] = pd.to_datetime(d['Dateofweld'], errors='coerce')
+    # Filtrado Industrial
+    d['Dateofweld'] = pd.to_datetime(d['Dateofweld'], dayfirst=True, errors='coerce')
     d = d.dropna(subset=['Dateofweld']).copy()
-    
-    # Exclusión de Plástico
     if 'MaterialType' in d.columns:
         d = d[d['MaterialType'].str.upper() != 'PLASTIC'].copy()
     return d
@@ -82,9 +91,8 @@ class RTOptimizerEngine:
 
     def get_lot_audit(self, df):
         d = df.copy()
-        d['RTDate1'] = pd.to_datetime(d['RTDate1'], errors='coerce')
+        d['RTDate1'] = pd.to_datetime(d['RTDate1'], dayfirst=True, errors='coerce')
         
-        # Limpieza numérica
         for col in ['Jointsize', 'Thickness']:
             if col in d.columns:
                 d[col] = d[col].astype(str).str.replace(',', '.')
@@ -92,18 +100,16 @@ class RTOptimizerEngine:
         
         d['RT_Perc'] = pd.to_numeric(d['RT_Perc'], errors='coerce').replace(0, np.nan).fillna(self.fallback_rt_perc * 100)
         
-        # Saneamiento de Booleanos
         for col in ['RT1rej', 'RTAccepted']:
             if col in d.columns:
                 d[col] = d[col].astype(str).str.upper().str.strip()
                 d[col] = d[col].map({'TRUE': True, 'FALSE': False, '1': True, '0': False, 'NAN': False}).fillna(False)
             else: d[col] = False
 
-        # Scope Filter con soporte ALL
+        location_map = {"WS": ["YWS", "S", "WS"], "FW": ["YFW", "FW", "F"], "PL": ["PL"]}
         if self.scope == "ALL":
             df_filtered = d[d['RT_Perc'] < 100].copy()
         else:
-            location_map = {"WS": ["YWS", "S", "WS"], "FW": ["YFW", "FW", "F"], "PL": ["PL"]}
             allowed_values = location_map.get(self.scope, [])
             df_filtered = d[(d['location'].isin(allowed_values)) & (d['RT_Perc'] < 100)].copy()
         
@@ -132,50 +138,51 @@ class RTOptimizerEngine:
             return "_".join(parts)
         df_wb['Lot_ID'] = df_wb.apply(build_id, axis=1)
 
-        # Auditoría ASME con Penalty Logic
-        audit = df_wb.groupby('Lot_ID').agg(
-            Total_Joints=('Joint_ID', 'count'), 
-            Total_Tested=('RTDate1', 'count'),
-            RT1_Rej_Count=('RT1rej', 'sum'),
-            Not_Accepted_Count=('RTAccepted', lambda x: (x == False).sum()),
-            RT_Req=('RT_Perc', 'max'), Welder=('Welder1', 'first'), Process=('WPS.1.Description', 'first'),
-            Material=('MaterialType', 'first'), Subcontractor=('Subc', 'first'), Block_Start=('Dateofweld', 'min')
-        ).reset_index()
+        # Auditoría Defensiva
+        agg_map = {
+            'Joint_ID': 'count', 'RTDate1': 'count', 'RT1rej': 'sum', 'RT_Perc': 'max',
+            'Welder1': 'first', 'WPS.1.Description': 'first', 'MaterialType': 'first', 
+            'Subc': 'first', 'Dateofweld': 'min'
+        }
+        # Solo agregamos las columnas que realmente existan en el dataframe
+        actual_agg = {k: v for k, v in agg_map.items() if k in df_wb.columns}
         
-        # Lógica Penalty
-        def calculate_asme_req(row):
-            base_req = np.ceil(row['Total_Joints'] * (row['RT_Req'] / 100))
-            if row['RT1_Rej_Count'] == 1: return min(row['Total_Joints'], base_req + 2)
-            if row['RT1_Rej_Count'] > 1: return row['Total_Joints']
-            return base_req
-
-        audit['Required'] = audit.apply(calculate_asme_req, axis=1).astype(int)
-        audit['Current_Done'] = audit['Total_Tested'] - audit['RT1_Rej_Count'] 
+        audit = df_wb.groupby('Lot_ID').agg(**{
+            'Total_Joints': ('Joint_ID', 'count'), 
+            'RT1_Done_Count': ('RTDate1', 'count'),
+            'RT1_Rej': ('RT1rej', 'sum'),
+            'Not_Accepted': ('RTAccepted', lambda x: (x == False).sum()),
+            'RT_Req': ('RT_Perc', 'max'),
+            'Welder': ('Welder1', 'first'),
+            'Process': ('WPS.1.Description', 'first'),
+            'Material': ('MaterialType', 'first'),
+            'Subcontractor': ('Subc', 'first'),
+            'Block_Start': ('Dateofweld', 'min')
+        }).reset_index()
+        
+        audit['Current_Done'] = audit['RT1_Done_Count'] - audit['RT1_Rej']
+        audit['Required'] = audit.apply(lambda r: min(r['Total_Joints'], np.ceil(r['Total_Joints']*(r['RT_Req']/100)) + (2 if r['RT1_Rej']==1 else (r['Total_Joints'] if r['RT1_Rej']>1 else 0))), axis=1).astype(int)
         audit['Done_%'] = (audit['Current_Done'] / audit['Total_Joints'] * 100).round(1)
         audit['Deficit'] = (audit['Required'] - audit['Current_Done']).clip(lower=0)
+        audit['Status'] = np.where((audit['Deficit'] == 0) & (audit['Not_Accepted'] == 0), '🟢 CLOSED', '🔴 OPEN')
         
-        # Status del Lote
-        audit['Status'] = np.where((audit['Deficit'] == 0) & (audit['Not_Accepted_Count'] == 0), '🟢 CLOSED', '🔴 OPEN')
-        
-        # Etiquetado para detalle (REGLA SOLICITADA)
-        def label_log(row):
-            if not row['RT1rej']: return "Standard OK"
-            if row['RT1rej'] and row['RTAccepted']: return "Rejected & Repaired"
-            if row['RT1rej'] and not row['RTAccepted']: return "Rejected & pending reparation"
+        def labeler(row):
+            lot_r = audit[audit['Lot_ID'] == row['Lot_ID']].iloc[0]
+            if row['RT1rej'] and row['RTAccepted']: return "🛠️ REPAIR DONE"
+            if row['RT1rej']: return "❌ REJECTED"
+            if pd.notna(row['RTDate1']): return "✅ STANDARD (OK)"
+            if lot_r['RT1_Rej'] == 1: return "🚨 PENALTY"
+            if lot_r['RT1_Rej'] > 1: return "🧨 FULL AUDIT"
             return "Standard"
-        
-        df_wb['Inspection_Type'] = df_wb.apply(label_log, axis=1)
+        df_wb['Inspection_Type'] = df_wb.apply(labeler, axis=1)
 
-        cols_order = ['Status', 'Lot_ID', 'Subcontractor', 'Total_Joints', 'Current_Done', 'Done_%', 
-                      'RT1_Rej_Count', 'Not_Accepted_Count', 'RT_Req', 'Required', 'Deficit', 'Welder', 'Process', 'Material', 'Block_Start']
-        return audit[cols_order], df_wb
+        return audit, df_wb
 
     def execute_optimization(self, df_audit_base, audit):
         if audit.empty: return pd.DataFrame()
         debts = audit.set_index('Lot_ID')['Deficit'].to_dict()
-        penalty_status = audit.set_index('Lot_ID')['RT1_Rej_Count'].to_dict()
-        penalty_assigned = {l_id: 0 for l_id in audit['Lot_ID']}
-
+        penalty_status = audit.set_index('Lot_ID')['RT1_Rej'].to_dict()
+        penalty_assigned = {l_id: 0 for l in audit['Lot_ID']}
         candidates = df_audit_base[df_audit_base['RTDate1'].isnull()].copy()
         plan = []
         while sum(debts.values()) > 0 and not candidates.empty:
@@ -187,52 +194,40 @@ class RTOptimizerEngine:
             candidates['Impact'] = candidates.apply(calc_impact, axis=1)
             if candidates['Impact'].max() == 0: break
             best_idx = candidates['Impact'].idxmax(); selected = candidates.loc[best_idx].copy()
-            
-            l_id = selected['Lot_ID']
-            n_rej = penalty_status.get(l_id, 0)
-            
+            l_id = selected['Lot_ID']; n_rej = penalty_status.get(l_id, 0)
             if n_rej > 1: reason = "PENALTY LOT"
             elif n_rej == 1 and penalty_assigned[l_id] < 2:
-                reason = "PENALTY TRACER"
-                penalty_assigned[l_id] += 1
+                reason = "PENALTY TRACER"; penalty_assigned[l_id] += 1
             else: reason = "Standard Sampling"
-            
             selected['Inspection_Reason'] = reason
             if debts.get(l_id, 0) > 0: debts[l_id] -= 1
             plan.append(selected); candidates = candidates.drop(best_idx)
         return pd.DataFrame(plan)
 
-# --- UI UTILS ---
-def get_avail(df, sub):
-    m = {"WS": ["YWS", "S", "WS"], "FW": ["YFW", "FW", "F"], "PL": ["PL"]}
-    locs = df['location'].unique() if sub == "ALL" else df[df['Subc'] == sub]['location'].unique()
-    available = [s for s, v in m.items() if any(l in locs for l in v)]
-    return ["ALL"] + available if len(available) > 1 else available
-
 # --- UI ---
 st.set_page_config(page_title="RT Optimizer", layout="wide", page_icon="🏗️")
 st.title(":material/engineering: RT Optimizer")
 
-# Carga de modelo
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.path.join(BASE_DIR, 'modelo_welding_lgb.joblib')
 loaded_model = load_ai_model(MODEL_PATH)
 
+# Mensaje Sidebar Restaurado
 if loaded_model: st.sidebar.success("✅ AI Engine Active (LGBM)")
 else: st.sidebar.warning("⚠️ Running in Standard Mode")
 
-uploaded_file = st.file_uploader("Upload SQL Extraction", type="csv")
+uploaded_file = st.file_uploader("Upload Daily SQL Extraction", type="csv")
 
 if uploaded_file:
     df_raw = load_and_preprocess_data(uploaded_file)
-    new_cols = {col: req for col in df_raw.columns for req in REQUIRED_COLS if col.lower() == req.lower()}
-    df_raw.rename(columns=new_cols, inplace=True)
-
-    # Sidebar
-    st.sidebar.header("⚙️ Configuration")
     subs_list = ["ALL"] + sorted(df_raw['Subc'].unique().tolist())
     selected_sub = st.sidebar.selectbox("🎯 Target Subcontractor:", options=subs_list)
     
+    def get_avail(df, sub):
+        m = {"WS": ["YWS", "S", "WS"], "FW": ["YFW", "FW", "F"], "PL": ["PL"]}
+        locs = df['location'].unique() if sub == "ALL" else df[df['Subc'] == sub]['location'].unique()
+        return ["ALL"] + [s for s, v in m.items() if any(l in locs for l in v)]
+
     location_scope = st.sidebar.radio("Location Scope:", options=get_avail(df_raw, selected_sub), index=0)
     days_per_lot = st.sidebar.number_input("Days per Window", min_value=1, value=14)
     fallback_perc = st.sidebar.slider("Fallback RT %", 0, 100, 10)
@@ -240,23 +235,22 @@ if uploaded_file:
     st.sidebar.divider()
     db_criteria = [col for cond, col in zip([st.sidebar.checkbox("Subcontractor (Subc)", value=True), st.sidebar.checkbox("Welder ID (Welder1)", value=True), st.sidebar.checkbox("Material Type", value=True), st.sidebar.checkbox("Welding Process", value=True), st.sidebar.checkbox("Line ID", value=False)], ['Subc', 'Welder1', 'MaterialType', 'WPS.1.Description', 'Line']) if cond]
 
-    # --- CORRECCIÓN LÓGICA FILTRADO SUBC ---
-    df_to_proc = df_raw.copy() if selected_sub == "ALL" else df_raw[df_raw['Subc'] == selected_sub].copy()
-
     engine = RTOptimizerEngine(fallback_perc/100, days_per_lot, db_criteria, location_scope, loaded_model)
+    df_to_proc = df_raw.copy() if selected_sub == "ALL" else df_raw[df_raw['Subc'] == selected_sub].copy()
     audit_df, df_with_lots = engine.get_lot_audit(df_to_proc)
 
-    if audit_df.empty: st.warning("No sampling data found.")
+    if audit_df.empty: st.warning("No data found for this selection.")
     else:
         tab1, tab2 = st.tabs([":material/assignment: Work Order", ":material/dashboard: Dashboard"])
         with tab1:
-            if st.button("🚀 Generate Optimized Plan"):
+            if st.button("🚀 Generate Plan"):
                 with st.spinner('Thinking...'):
                     result = engine.execute_optimization(df_with_lots, audit_df.copy())
                     if not result.empty:
                         result['Plan_Date'] = datetime.now().strftime('%d/%m/%Y')
-                        st.dataframe(result[['Joint_ID', 'Risk_Level', 'Inspection_Reason', 'Lot_ID', 'Welder1', 'Line', 'MaterialType', 'WPS.1.Description']], use_container_width=True, hide_index=True)
-                        st.download_button("📥 Download Plan", result.to_csv(sep=';', index=False).encode('utf-8-sig'), f"plan_{selected_sub}.csv", "text/csv")
+                        cols = ['Joint_ID', 'Risk_Level', 'Inspection_Reason', 'Lot_ID', 'Welder1', 'Line', 'MaterialType', 'WPS.1.Description']
+                        st.dataframe(result[[c for c in cols if c in result.columns]], use_container_width=True, hide_index=True)
+                        st.download_button("📥 Download", result.to_csv(sep=';', index=False).encode('utf-8-sig'), f"plan_{selected_sub}.csv", "text/csv")
                     else: st.success("✅ Compliance achieved.")
 
         with tab2:
@@ -268,24 +262,23 @@ if uploaded_file:
             k5.metric("Avg. Target RT %", f"{audit_df['RT_Req'].mean():.1f}%" if total_l > 0 else "0%")
             st.divider()
             f1, f2, f3, f4 = st.columns(4)
-            with f1: s_lid = st.multiselect("Filter Lot ID", options=sorted(audit_df['Lot_ID'].unique()))
-            with f2: s_w = st.multiselect("Filter Welder", options=sorted(audit_df['Welder'].unique()))
-            with f3: s_m = st.multiselect("Filter Material", options=sorted(audit_df['Material'].unique()))
-            with f4: s_s = st.multiselect("Filter Status", options=['🔴 OPEN', '🟢 CLOSED'])
+            with f1: s_lid = st.multiselect("Lot ID", options=sorted(audit_df['Lot_ID'].unique()))
+            with f2: s_w = st.multiselect("Welder", options=sorted(audit_df['Welder'].unique()))
+            with f3: s_m = st.multiselect("Material", options=sorted(audit_df['Material'].unique()))
+            with f4: s_s = st.multiselect("Status", options=['🔴 OPEN', '🟢 CLOSED'])
             f_audit = audit_df.copy()
             if s_lid: f_audit = f_audit[f_audit['Lot_ID'].isin(s_lid)]
             if s_w: f_audit = f_audit[f_audit['Welder'].isin(s_w)]
             if s_m: f_audit = f_audit[f_audit['Material'].isin(s_m)]
             if s_s: f_audit = f_audit[f_audit['Status'].isin(s_s)]
 
-            st.subheader("All Lots Summary")
+            # LOG DE LOTES RESTAURADO
+            st.subheader("All Lots Summary Log")
             event = st.dataframe(f_audit, use_container_width=True, on_select="rerun", selection_mode="single-row", hide_index=True)
             if event.selection.rows:
                 row_idx = event.selection.rows[0]; lot_id = f_audit.iloc[row_idx]['Lot_ID']
                 st.markdown(f"### 🔍 Detailed Explorer: Lot `{lot_id}`")
-                det_cols = ['Joint_ID', 'Risk_Level', 'Inspection_Type', 'Line', 'Dateofweld', 'RTDate1', 'RT1rej', 'RTAccepted', 'RT_Perc']
-                st.dataframe(df_with_lots[df_with_lots['Lot_ID'] == lot_id][[c for c in det_cols if c in df_with_lots.columns]], use_container_width=True, hide_index=True)
-            else: st.info("💡 Click on any row above to see individual joints.")
+                st.dataframe(df_with_lots[df_with_lots['Lot_ID'] == lot_id][['Joint_ID', 'Risk_Level', 'Inspection_Type', 'Line', 'Dateofweld', 'RTDate1', 'RT1rej', 'RTAccepted', 'RT_Perc']], use_container_width=True, hide_index=True)
 else:
     st.info("💡 Please upload your SQL CSV extraction.")
     st.table(pd.DataFrame({'Mandatory Column Name': REQUIRED_COLS}))
