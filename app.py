@@ -17,9 +17,8 @@ if not hasattr(sklearn.compose._column_transformer, '_RemainderColsList'):
 if not hasattr(sklearn.impute.SimpleImputer, '_fill_dtype'):
     setattr(sklearn.impute.SimpleImputer, '_fill_dtype', float)
 
-# --- 2. DICCIONARIO DE COLUMNAS INTERNAS (ESTÁNDAR) ---
-# Estos son los nombres que el motor usará internamente sí o sí.
-COL_ID = 'Joint_ID'
+# --- 2. CONFIGURACIÓN DE COLUMNAS (NORMALIZACIÓN) ---
+# Nombres que el motor usará internamente
 COL_SUBC = 'Subc'
 COL_WELDER = 'Welder1'
 COL_LINE = 'Line'
@@ -34,8 +33,6 @@ COL_ACCEPTED = 'RTAccepted'
 COL_SIZE = 'Jointsize'
 COL_THK = 'Thickness'
 
-REQUIRED_INTERNAL = [COL_ID, COL_SUBC, COL_WELDER, COL_LINE, COL_LOC, COL_MAT, COL_WPS, COL_DATE, COL_RT1_DATE, COL_PERC, COL_RT1_REJ, COL_ACCEPTED, COL_SIZE, COL_THK]
-
 # --- 3. FUNCIONES DE CARGA Y SANEAMIENTO ---
 @st.cache_resource
 def load_ai_model(path):
@@ -46,30 +43,36 @@ def load_ai_model(path):
 
 @st.cache_data
 def load_and_normalize_data(file):
-    # utf-8-sig para limpiar símbolos invisibles del inicio
     d = pd.read_csv(file, sep=';', encoding='utf-8-sig')
     d.columns = d.columns.str.strip()
     
-    # NORMALIZACIÓN AGRESIVA: Busca la columna ignorando mayúsculas/minúsculas
-    rename_map = {}
-    for col_csv in d.columns:
-        for col_req in REQUIRED_INTERNAL:
-            if col_csv.lower() == col_req.lower():
-                rename_map[col_csv] = col_req
-    d.rename(columns=rename_map, inplace=True)
+    # Mapeo flexible para evitar KeyErrors
+    mapping = {
+        'subc': COL_SUBC, 'welder1': COL_WELDER, 'line': COL_LINE, 
+        'location': COL_LOC, 'materialtype': COL_MAT, 'wps.1.description': COL_WPS,
+        'dateofweld': COL_DATE, 'rtdate1': COL_RT1_DATE, 'rt_perc': COL_PERC,
+        'rt1rej': COL_RT1_REJ, 'rtaccepted': COL_ACCEPTED, 
+        'jointsize': COL_SIZE, 'thickness': COL_THK
+    }
     
-    # Limpieza de celdas
+    new_cols = {}
+    for c in d.columns:
+        if c.lower() in mapping:
+            new_cols[c] = mapping[c.lower()]
+    d.rename(columns=new_cols, inplace=True)
+    
+    # Si falta Joint_ID en el SQL, lo creamos para que no falle el motor
+    if 'Joint_ID' not in d.columns:
+        d['Joint_ID'] = range(1, len(d) + 1)
+    
     for col in d.select_dtypes(['object']).columns:
         d[col] = d[col].astype(str).str.strip()
     
-    # Filtro Industrial 1: Solo soldadas
-    d[COL_DATE] = pd.to_datetime(d[COL_DATE], dayfirst=True, errors='coerce')
+    # Filtro Industrial
+    d[COL_DATE] = pd.to_datetime(d[COL_DATE], errors='coerce')
     d = d.dropna(subset=[COL_DATE]).copy()
-    
-    # Filtro Industrial 2: No Plásticos
     if COL_MAT in d.columns:
         d = d[d[COL_MAT].str.upper() != 'PLASTIC'].copy()
-        
     return d
 
 # --- 4. OPTIMIZATION ENGINE ---
@@ -105,9 +108,8 @@ class RTOptimizerEngine:
 
     def get_lot_audit(self, df):
         d = df.copy()
-        d[COL_RT1_DATE] = pd.to_datetime(d[COL_RT1_DATE], dayfirst=True, errors='coerce')
+        d[COL_RT1_DATE] = pd.to_datetime(d[COL_RT1_DATE], errors='coerce')
         
-        # Saneamiento de numéricos
         for col in [COL_SIZE, COL_THK]:
             if col in d.columns:
                 d[col] = d[col].astype(str).str.replace(',', '.')
@@ -115,20 +117,18 @@ class RTOptimizerEngine:
         
         d[COL_PERC] = pd.to_numeric(d[COL_PERC], errors='coerce').replace(0, np.nan).fillna(self.fallback_rt_perc * 100)
         
-        # Saneamiento de Booleanos
         for col in [COL_RT1_REJ, COL_ACCEPTED]:
             if col in d.columns:
                 d[col] = d[col].astype(str).str.upper()
                 d[col] = d[col].map({'TRUE': True, 'FALSE': False, '1': True, '0': False, 'NAN': False}).fillna(False)
             else: d[col] = False
 
-        # Filtro de Ubicación
         location_map = {"WS": ["YWS", "S", "WS"], "FW": ["YFW", "FW", "F"], "PL": ["PL"]}
         if self.scope == "ALL":
             df_filtered = d[d[COL_PERC] < 100].copy()
         else:
-            allowed_values = location_map.get(self.scope, [])
-            df_filtered = d[(d[COL_LOC].isin(allowed_values)) & (d[COL_PERC] < 100)].copy()
+            allowed = location_map.get(self.scope, [])
+            df_filtered = d[(d[COL_LOC].isin(allowed)) & (d[COL_PERC] < 100)].copy()
         
         if df_filtered.empty: return pd.DataFrame(), pd.DataFrame()
 
@@ -155,9 +155,9 @@ class RTOptimizerEngine:
             return "_".join(parts)
         df_wb['Lot_ID'] = df_wb.apply(build_id, axis=1)
 
-        # Auditoría Defensiva (Nombres fijos garantizados)
+        # Auditoría con Penalty Logic
         audit = df_wb.groupby('Lot_ID').agg(
-            Total_Joints=(COL_ID, 'count'), RT1_Done_Count=(COL_RT1_DATE, 'count'),
+            Total_Joints=('Joint_ID', 'count'), RT1_Done_Count=(COL_RT1_DATE, 'count'),
             RT1_Rejects=(COL_RT1_REJ, 'sum'), Not_Accepted=(COL_ACCEPTED, lambda x: (x == False).sum()),
             RT_Req=(COL_PERC, 'max'), Welder=(COL_WELDER, 'first'), Process=(COL_WPS, 'first'),
             Material=(COL_MAT, 'first'), Subcontractor=(COL_SUBC, 'first'), Block_Start=(COL_DATE, 'min')
@@ -165,7 +165,6 @@ class RTOptimizerEngine:
         
         audit['Current_Done'] = audit['RT1_Done_Count'] - audit['RT1_Rejects']
         
-        # REGLA PENALTY
         def calculate_req(row):
             base = np.ceil(row['Total_Joints'] * (row['RT_Req'] / 100))
             if row['RT1_Rej'] == 1: return min(row['Total_Joints'], base + 2)
@@ -221,6 +220,7 @@ class RTOptimizerEngine:
 st.set_page_config(page_title="RT Optimizer", layout="wide", page_icon="🏗️")
 st.title(":material/engineering: RT Optimizer")
 
+# Carga de modelo
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.path.join(BASE_DIR, 'modelo_welding_lgb.joblib')
 loaded_model = load_ai_model(MODEL_PATH)
@@ -228,11 +228,10 @@ loaded_model = load_ai_model(MODEL_PATH)
 if loaded_model: st.sidebar.success("✅ AI Engine Active (LGBM)")
 else: st.sidebar.warning("⚠️ Running in Standard Mode")
 
-uploaded_file = st.file_uploader("Upload SQL Extraction", type="csv")
+uploaded_file = st.file_uploader("Upload Daily SQL Extraction", type="csv")
 
 if uploaded_file:
     df_raw = load_and_normalize_data(uploaded_file)
-    
     subs_list = ["ALL"] + sorted(df_raw[COL_SUBC].unique().tolist())
     selected_sub = st.sidebar.selectbox("🎯 Target Subcontractor:", options=subs_list)
     
@@ -252,16 +251,16 @@ if uploaded_file:
     df_to_proc = df_raw.copy() if selected_sub == "ALL" else df_raw[df_raw[COL_SUBC] == selected_sub].copy()
     audit_df, df_with_lots = engine.get_lot_audit(df_to_proc)
 
-    if audit_df.empty: st.warning("No data found for this selection.")
+    if audit_df.empty: st.warning("No sampling data found.")
     else:
         tab1, tab2 = st.tabs([":material/assignment: Work Order", ":material/dashboard: Dashboard"])
         with tab1:
-            if st.button("🚀 Generate Optimized Plan"):
+            if st.button("🚀 Generate Plan"):
                 with st.spinner('Calculating...'):
                     result = engine.execute_optimization(df_with_lots, audit_df.copy())
                     if not result.empty:
                         result['Plan_Date'] = datetime.now().strftime('%d/%m/%Y')
-                        cols = [COL_ID, 'Risk_Level', 'Inspection_Reason', 'Lot_ID', COL_WELDER, COL_LINE, COL_MAT, COL_WPS]
+                        cols = ['Joint_ID', 'Risk_Level', 'Inspection_Reason', 'Lot_ID', COL_WELDER, COL_LINE, COL_MAT, COL_WPS]
                         st.dataframe(result[[c for c in cols if c in result.columns]], use_container_width=True, hide_index=True)
                         st.download_button("📥 Download", result.to_csv(sep=';', index=False).encode('utf-8-sig'), f"plan_{selected_sub}.csv", "text/csv")
                     else: st.success("✅ Compliance achieved.")
@@ -290,8 +289,8 @@ if uploaded_file:
             if event.selection.rows:
                 row_idx = event.selection.rows[0]; lot_id = f_audit.iloc[row_idx]['Lot_ID']
                 st.markdown(f"### 🔍 Detailed Explorer: Lot `{lot_id}`")
-                det_cols = [COL_ID, 'Risk_Level', 'Inspection_Type', COL_LINE, COL_DATE, COL_RT1_DATE, COL_RT1_REJ, COL_ACCEPTED, COL_PERC]
+                det_cols = ['Joint_ID', 'Risk_Level', 'Inspection_Type', COL_LINE, COL_DATE, COL_RT1_DATE, COL_RT1_REJ, COL_ACCEPTED, COL_PERC]
                 st.dataframe(df_with_lots[df_with_lots['Lot_ID'] == lot_id][[c for c in det_cols if c in df_with_lots.columns]], use_container_width=True, hide_index=True)
+            else: st.info("💡 Click on any row above to see individual joints.")
 else:
     st.info("💡 Please upload your SQL CSV extraction.")
-    st.table(pd.DataFrame({'Mandatory Column Name': REQUIRED_INTERNAL}))
