@@ -7,7 +7,7 @@ import sklearn.compose
 import sklearn.impute
 from datetime import datetime
 
-# --- PARCHE NINJA DE COMPATIBILIDAD IA ---
+# --- 1. PARCHES DE COMPATIBILIDAD IA ---
 if not hasattr(sklearn.compose._column_transformer, '_RemainderColsList'):
     class _RemainderColsList(list):
         def __init__(self, *args, **kwargs):
@@ -17,7 +17,15 @@ if not hasattr(sklearn.compose._column_transformer, '_RemainderColsList'):
 if not hasattr(sklearn.impute.SimpleImputer, '_fill_dtype'):
     setattr(sklearn.impute.SimpleImputer, '_fill_dtype', float)
 
-# --- CACHED FUNCTIONS ---
+# --- 2. COLUMNAS REQUERIDAS (Definición Global) ---
+REQUIRED_COLS = [
+    'Joint_ID', 'Subc', 'Welder1', 'Line', 'location', 
+    'MaterialType', 'WPS.1.Description', 'Dateofweld', 
+    'RTDate1', 'RT_Perc', 'RT1rej', 'RT2Date1', 
+    'Jointsize', 'Thickness'
+]
+
+# --- 3. FUNCIONES CON CACHÉ ---
 @st.cache_resource
 def load_ai_model(path):
     if os.path.exists(path):
@@ -36,7 +44,7 @@ def load_and_preprocess_data(file):
         d = d[d['MaterialType'].str.upper() != 'PLASTIC'].copy()
     return d
 
-# --- OPTIMIZATION ENGINE ---
+# --- 4. OPTIMIZATION ENGINE ---
 class RTOptimizerEngine:
     def __init__(self, fallback_rt_perc, window_days, lot_criteria, selected_location_scope, model):
         self.fallback_rt_perc = fallback_rt_perc
@@ -146,7 +154,6 @@ class RTOptimizerEngine:
     def execute_optimization(self, df_audit_base, audit):
         if audit.empty: return pd.DataFrame()
         debts = audit.set_index('Lot_ID')['Deficit'].to_dict()
-        penalty_status = audit.set_index('Lot_ID')['RT1_Rej'].to_dict()
         candidates = df_audit_base[df_audit_base['RTDate1'].isnull()].copy()
         plan = []
         while sum(debts.values()) > 0 and not candidates.empty:
@@ -158,9 +165,7 @@ class RTOptimizerEngine:
             candidates['Impact'] = candidates.apply(calc_impact, axis=1)
             if candidates['Impact'].max() == 0: break
             best_idx = candidates['Impact'].idxmax(); selected = candidates.loc[best_idx].copy()
-            l_id = selected['Lot_ID']; n_rej = penalty_status.get(l_id, 0)
-            selected['Inspection_Reason'] = "🚨 PENALTY" if n_rej == 1 else ("🧨 FULL AUDIT" if n_rej > 1 else "Standard")
-            if debts.get(l_id, 0) > 0: debts[l_id] -= 1
+            if debts.get(selected['Lot_ID'], 0) > 0: debts[selected['Lot_ID']] -= 1
             plan.append(selected); candidates = candidates.drop(best_idx)
         return pd.DataFrame(plan)
 
@@ -177,8 +182,9 @@ uploaded_file = st.file_uploader("Upload SQL Extraction (CSV)", type="csv")
 
 if uploaded_file:
     df_raw = load_and_preprocess_data(uploaded_file)
-    required_cols = ['Joint_ID', 'Subc', 'Welder1', 'Line', 'location', 'MaterialType', 'WPS.1.Description', 'Dateofweld', 'RTDate1', 'RT_Perc', 'RT1rej', 'RT2Date1', 'Jointsize', 'Thickness']
-    new_cols = {col: req for col in df_raw.columns for req in required_cols if col.lower() == req.lower()}
+    
+    # Header mapping robusto
+    new_cols = {col: req for col in df_raw.columns for req in REQUIRED_COLS if col.lower() == req.lower()}
     df_raw.rename(columns=new_cols, inplace=True)
 
     # Sidebar
@@ -204,7 +210,7 @@ if uploaded_file:
     df_to_proc = df_raw.copy() if selected_sub == "ALL" else df_raw[df_raw['Subc'] == selected_sub].copy()
     audit_df, df_with_lots = engine.get_lot_audit(df_to_proc)
 
-    if audit_df.empty: st.warning("No data found.")
+    if audit_df.empty: st.warning("No data found for this selection.")
     else:
         tab1, tab2 = st.tabs([":material/assignment: Work Order", ":material/dashboard: Dashboard"])
         with tab1:
@@ -213,12 +219,11 @@ if uploaded_file:
                     result = engine.execute_optimization(df_with_lots, audit_df.copy())
                     if not result.empty:
                         result['Plan_Date'] = datetime.now().strftime('%d/%m/%Y')
-                        st.dataframe(result[['Joint_ID', 'Risk_Level', 'Inspection_Reason', 'Lot_ID', 'Welder1', 'Line', 'MaterialType', 'WPS.1.Description']], use_container_width=True, hide_index=True)
+                        st.dataframe(result[['Joint_ID', 'Risk_Level', 'Lot_ID', 'Welder1', 'Line', 'MaterialType', 'WPS.1.Description']], use_container_width=True, hide_index=True)
                         st.download_button("📥 Download", result.to_csv(sep=';', index=False).encode('utf-8-sig'), f"plan_{selected_sub}.csv", "text/csv")
                     else: st.success("✅ Compliance achieved.")
 
         with tab2:
-            st.subheader(f"Status: {selected_sub} | {location_scope}")
             k1, k2, k3, k4, k5 = st.columns(5)
             total_l = len(audit_df); open_l = len(audit_df[audit_df['Status'] == '🔴 OPEN'])
             k1.metric("Total Lots", total_l); k2.metric("Open Lots", open_l)
@@ -244,5 +249,5 @@ if uploaded_file:
                 st.dataframe(df_with_lots[df_with_lots['Lot_ID'] == lot_id][[c for c in det_cols if c in df_with_lots.columns]], use_container_width=True, hide_index=True)
 else:
     st.info("💡 Please upload your SQL CSV extraction.")
-    schema_df = pd.DataFrame({'Mandatory Column Name': required_cols})
+    schema_df = pd.DataFrame({'Mandatory Column Name': REQUIRED_COLS})
     st.table(schema_df)
