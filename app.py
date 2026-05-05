@@ -192,7 +192,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.path.join(BASE_DIR, 'modelo_welding_lgb.joblib')
 loaded_model = load_ai_model(MODEL_PATH)
 
-if loaded_model: st.sidebar.success("✅ AI Engine Active (LGBM)")
+if loaded_model: st.sidebar.success("✅ AI Engine Loaded (LGBM)")
 else: st.sidebar.warning("⚠️ Running in Standard Mode")
 
 uploaded_file = st.file_uploader("Upload Daily Extraction (CSV)", type="csv")
