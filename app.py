@@ -13,6 +13,10 @@ if not hasattr(sklearn.compose._column_transformer, '_RemainderColsList'):
             super().__init__(*args, **kwargs)
     sklearn.compose._column_transformer._RemainderColsList = _RemainderColsList
 
+    # 2. Parche para SimpleImputer (Corrige el error _fill_dtype)
+if not hasattr(sklearn.impute.SimpleImputer, '_fill_dtype'):
+    setattr(sklearn.impute.SimpleImputer, '_fill_dtype', float)
+
 # --- OPTIMIZATION ENGINE ---
 class RTOptimizerEngine:
     def __init__(self, fallback_rt_perc, window_days, lot_criteria, selected_location_scope, model_path=None):
