@@ -3,20 +3,16 @@ import pandas as pd
 import numpy as np
 import joblib
 import os
-from datetime import datetime
 
 # --- CONFIG ---
-DB_MAP = {
-    'Joint_ID': 'Joint_ID', 'Subc': 'Subc', 'Welder1': 'Welder1', 'Line': 'Line',
-    'location': 'location', 'MaterialType': 'MaterialType', 'WPS.1.Description': 'Process',
-    'Dateofweld': 'Dateofweld', 'RTDate1': 'RTDate1', 'RT_Perc': 'RT_Perc',
-    'RT1rej': 'RT1rej', 'RTAccepted': 'RTAccepted', 'Jointsize': 'Jointsize', 'Thickness': 'Thickness'
-}
-
 REQUIRED_COLS = [
     'Joint_ID','Subc','Welder1','Line','location','MaterialType',
-    'Process','Dateofweld','RTDate1','RT_Perc',
+    'WPS.1.Description','Dateofweld','RTDate1','RT_Perc',
     'RT1rej','RTAccepted','Jointsize','Thickness'
+]
+
+MODEL_FEATURES = [
+    'Jointsize', 'Subc', 'MaterialType', 'WPS.1.Description', 'Thickness'
 ]
 
 # --- LOAD MODEL ---
@@ -33,17 +29,9 @@ def load_ai_model(path):
 @st.cache_data
 def load_and_preprocess(file):
     df = pd.read_csv(file, sep=';', encoding='utf-8-sig')
-    df.columns = df.columns.str.strip()
 
-    # Rename tolerante
-    rename_map = {}
-    for col in df.columns:
-        col_clean = col.lower().replace('.', '').replace(' ', '')
-        for k in DB_MAP:
-            k_clean = k.lower().replace('.', '').replace(' ', '')
-            if col_clean == k_clean:
-                rename_map[col] = DB_MAP[k]
-    df.rename(columns=rename_map, inplace=True)
+    # Limpieza columnas (pero SIN renombrar)
+    df.columns = df.columns.str.strip()
 
     # Crear columnas faltantes
     for col in REQUIRED_COLS:
@@ -55,7 +43,7 @@ def load_and_preprocess(file):
         df[col] = df[col].astype(str).str.strip()
         df[col] = df[col].replace({'': np.nan, 'nan': np.nan, 'None': np.nan})
 
-    # Tipos
+    # Fechas
     df['Dateofweld'] = pd.to_datetime(df['Dateofweld'], dayfirst=True, errors='coerce')
     df['RTDate1'] = pd.to_datetime(df['RTDate1'], dayfirst=True, errors='coerce')
 
@@ -100,15 +88,20 @@ class RTOptimizerEngine:
         d['RT_Perc'] = d['RT_Perc'].replace(0, np.nan)
         d['RT_Perc'] = d['RT_Perc'].fillna(self.fallback_rt_perc * 100)
 
-        # IA
+        # --- IA ---
         if self.model:
             try:
-                X = d[['Jointsize', 'Subc', 'MaterialType', 'Process', 'Thickness']].copy()
-                for col in ['Subc','MaterialType','Process']:
+                X = d[MODEL_FEATURES].copy()
+
+                # El modelo tolera NaN, pero aseguramos categóricos
+                for col in ['Subc','MaterialType','WPS.1.Description']:
                     X[col] = X[col].fillna("UNKNOWN")
+
                 d['AI_Prob'] = self.model.predict_proba(X)[:, 1]
+
             except Exception as e:
-                st.warning(f"Model failed: {e}")
+                st.warning(f"⚠️ Model failed: {e}")
+                st.write("Columnas disponibles:", d.columns.tolist())
                 d['AI_Prob'] = 0.0
         else:
             d['AI_Prob'] = 0.0
@@ -165,7 +158,6 @@ class RTOptimizerEngine:
 
             for _, row in group.iterrows():
 
-                # STATUS
                 if pd.isna(row['RTDate1']):
                     status.append("Not Inspected")
                 elif not row['RT1rej']:
@@ -175,7 +167,6 @@ class RTOptimizerEngine:
                 else:
                     status.append("Rejected Pending")
 
-                # TYPE
                 if force_100:
                     types.append("Penalty Lot 100%")
                     continue
@@ -190,7 +181,6 @@ class RTOptimizerEngine:
 
                     if row['RT1rej']:
                         force_100 = True
-
                 else:
                     types.append("Random Inspection Joint")
 
@@ -223,7 +213,7 @@ class RTOptimizerEngine:
 
         return audit, d
 
-    # --- OPTIMIZACIÓN (AI → DEFICIT) ---
+    # --- OPTIMIZACIÓN ---
     def execute_optimization(self, df, audit):
 
         debts = audit.set_index('Lot_ID')['Deficit'].to_dict()
@@ -251,7 +241,7 @@ class RTOptimizerEngine:
 
 # --- UI ---
 st.set_page_config(page_title="RT Optimizer PRO", layout="wide")
-st.title("🏗️ RT Optimizer PRO")
+st.title("🏗️ RT Optimizer PRO (Original Columns Mode)")
 
 model = load_ai_model("modelo_welding_lgb.joblib")
 
@@ -260,9 +250,11 @@ file = st.file_uploader("Upload CSV", type="csv")
 if file:
     df = load_and_preprocess(file)
 
+    st.write("📊 Columnas detectadas:", df.columns.tolist())
+
     criteria = st.multiselect(
         "Grouping Criteria",
-        ['Subc', 'Welder1', 'MaterialType', 'Process', 'Line'],
+        ['Subc', 'Welder1', 'MaterialType', 'WPS.1.Description', 'Line'],
         default=['Subc', 'Welder1']
     )
 
