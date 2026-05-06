@@ -17,14 +17,7 @@ if not hasattr(sklearn.compose._column_transformer, '_RemainderColsList'):
 if not hasattr(sklearn.impute.SimpleImputer, '_fill_dtype'):
     setattr(sklearn.impute.SimpleImputer, '_fill_dtype', float)
 
-# --- 2. CONFIGURACIÓN DE COLUMNAS (GLOBAL) ---
-REQUIRED_COLS = [
-    'Joint_ID', 'Subc', 'Welder1', 'Line', 'location', 
-    'MaterialType', 'WPS.1.Description', 'Dateofweld', 
-    'RTDate1', 'RT_Perc', 'RT1rej', 'RTAccepted', 
-    'Jointsize', 'Thickness'
-]
-
+# --- 2. CONFIGURACIÓN DE COLUMNAS (NORMALIZACIÓN) ---
 DB_MAP = {
     'Joint_ID': 'Joint_ID', 'Subc': 'Subc', 'Welder1': 'Welder1', 'Line': 'Line',
     'location': 'location', 'MaterialType': 'MaterialType', 'WPS.1.Description': 'WPS.1.Description',
@@ -66,8 +59,9 @@ class RTOptimizerEngine:
         d = df.copy()
         d['RTDate1'] = pd.to_datetime(d['RTDate1'], dayfirst=True, errors='coerce')
         for col in ['Jointsize', 'Thickness']:
-            d[col] = d[col].astype(str).str.replace(',', '.')
-            d[col] = pd.to_numeric(d[col], errors='coerce').fillna(0)
+            if col in d.columns:
+                d[col] = d[col].astype(str).str.replace(',', '.')
+                d[col] = pd.to_numeric(d[col], errors='coerce').fillna(0)
         
         d['RT_Perc'] = pd.to_numeric(d['RT_Perc'], errors='coerce').replace(0, np.nan).fillna(self.fallback_rt_perc * 100)
         for col in ['RT1rej', 'RTAccepted']:
@@ -81,21 +75,21 @@ class RTOptimizerEngine:
         
         if df_filtered.empty: return pd.DataFrame(), pd.DataFrame()
 
-        # IA Inferencia (Punto 13 Checklist - Reasignación de nombres para el Pipeline)
+        # IA Inferencia (Punto 13 Checklist - Features)
         if self.model_pipeline:
             try:
-                # El modelo espera 'WPS.1.Description', 'Subc', 'MaterialType', etc.
-                X = df_filtered[['Jointsize', 'Subc', 'MaterialType', 'WPS.1.Description', 'Thickness']]
-                df_filtered['AI_Prob'] = self.model_pipeline.predict_proba(X)[:, 1]
+                X_feats = ['Jointsize', 'Subc', 'MaterialType', 'WPS.1.Description', 'Thickness']
+                df_filtered['AI_Prob'] = self.model_pipeline.predict_proba(df_filtered[X_feats])[:, 1]
             except: df_filtered['AI_Prob'] = 0.0
         else: df_filtered['AI_Prob'] = 0.0
 
         df_filtered['Risk_Level'] = df_filtered['AI_Prob'].apply(lambda p: f"🔴 High ({p*100:.1f}%)" if p > 0.75 else (f"🟡 Med ({p*100:.1f}%)" if p > 0.3 else f"🟢 Low ({p*100:.1f}%)"))
 
-        # Lotes
+        # --- BLOQUES DINÁMICOS Y ID DE LOTE ---
         df_filtered = df_filtered.sort_values(['Subc', 'Dateofweld'])
         processed = []
         for _, group in df_filtered.groupby(self.lot_criteria, dropna=False):
+            if group.empty: continue
             group = group.copy()
             start_date = group['Dateofweld'].iloc[0]
             current_block = 0
@@ -106,58 +100,70 @@ class RTOptimizerEngine:
                     current_block += 1
                 b_ids.append(current_block)
             group['Block_ID'] = b_ids
-            group['Lot_ID'] = group['Block_ID'].astype(str) + "_" + "_".join([group[c].astype(str).iloc[0] for c in self.lot_criteria])
+            # Crear ID de forma robusta
+            group['Lot_ID'] = group['Block_ID'].astype(str)
+            for c in self.lot_criteria: group['Lot_ID'] += "_" + group[c].astype(str)
             processed.append(group)
+        
+        if not processed: return pd.DataFrame(), pd.DataFrame()
         df_wb = pd.concat(processed).reset_index(drop=True)
 
-        # Auditoría de Penalties
+        # Auditoría de Requisitos y Penalties
         audit = df_wb.groupby('Lot_ID', as_index=False).agg(
-            Total_Joints=('Joint_ID', 'count'), RT1_Count=('RTDate1', 'count'), 
-            Rej_Count=('RT1rej', 'sum'), Not_Accepted=('RTAccepted', lambda x: (x == False).sum()),
-            RT_Req=('RT_Perc', 'max'), Welder=('Welder1', 'first'), Subcontractor=('Subc', 'first'),
-            Material=('MaterialType', 'first'), Block_Start=('Dateofweld', 'min')
+            Total_Joints=('Joint_ID', 'count'), RT1_Done=('RTDate1', 'count'), 
+            Rej_Count=('RT1rej', 'sum'), Pending_Repairs=('RTAccepted', lambda x: (x == False).sum()),
+            RT_Req=('RT_Perc', 'max'), Welder=('Welder1', 'first'), 
+            Subcontractor=('Subc', 'first'), Material=('MaterialType', 'first'), Block_Start=('Dateofweld', 'min')
         )
 
-        # ETIQUETADO DE INTEGRIDAD (Puntos 7-12)
+        # --- ETIQUETADO DE INTEGRIDAD ---
         df_wb = df_wb.merge(audit[['Lot_ID', 'Rej_Count']], on='Lot_ID', how='left')
         
-        final_types = []; final_status = []
-        current_lot = ""; found_fail = False; tracers = 0; is_100 = False
-        df_wb = df_wb.sort_values(['Lot_ID', 'RTDate1', 'Dateofweld'], ascending=[True, True, True])
-
-        for _, row in df_wb.iterrows():
-            if row['Lot_ID'] != current_lot:
-                current_lot = row['Lot_ID']; found_fail = False; tracers = 0; is_100 = row['Rej_Count'] > 1
+        def label_integrity(group):
+            group = group.sort_values(['RTDate1', 'Dateofweld'], ascending=[True, True])
+            n_rej_total = group['Rej_Count'].iloc[0]
+            types = []; stats = []
+            fail_found = False; tracers = 0
             
-            if pd.isna(row['RTDate1']): s = "Not Inspected"
-            elif not row['RT1rej']: s = "Standard RT"
-            elif row['RTAccepted']: s = "Rejected & Repaired"
-            else: s = "Rejected & Pending to be repaired"
-            final_status.append(s)
+            for _, row in group.iterrows():
+                # Status (Puntos 9-11 Checklist)
+                if pd.isna(row['RTDate1']): s = "Not Inspected"
+                elif not row['RT1rej']: s = "Standard RT"
+                elif row['RTAccepted']: s = "Rejected & Repaired"
+                else: s = "Rejected & Pending to be repaired"
+                stats.append(s)
+                
+                # Type (Puntos 7-8-12 Checklist)
+                if n_rej_total > 1: types.append("Penalty Lot 100%")
+                elif n_rej_total == 1:
+                    if row['RT1rej'] and not fail_found:
+                        types.append("Random Inspection Joint"); fail_found = True
+                    elif fail_found and tracers < 2:
+                        types.append("Penalty Tracer"); tracers += 1
+                        if row['RT1rej']: # Si falla el tracer, escala a 100% el resto
+                            types[-1] = "Penalty Lot 100%"
+                            n_rej_total = 2 
+                    else: types.append("Random Inspection Joint")
+                else: types.append("Random Inspection Joint")
+            
+            group['Inspection_Type'] = types
+            group['Inspection_Status'] = stats
+            return group
 
-            if is_100: final_types.append("PENALTY LOT")
-            elif row['RT1rej'] and not found_fail:
-                final_types.append("Random Inspection Joint"); found_fail = True
-            elif found_fail and tracers < 2:
-                final_types.append("PENALTY TRACER"); tracers += 1
-                if row['RT1rej']: is_100 = True
-            else: final_types.append("Random Inspection Joint")
-
-        df_wb['Inspection_Type'] = final_types
-        df_wb['Inspection_Status'] = final_status
+        df_wb = df_wb.groupby('Lot_ID', group_keys=False).apply(label_integrity)
 
         # Requisito Final
         def final_req(r):
             lot_data = df_wb[df_wb['Lot_ID'] == r['Lot_ID']]
-            if "PENALTY LOT" in lot_data['Inspection_Type'].values: return r['Total_Joints']
+            if "Penalty Lot 100%" in lot_data['Inspection_Type'].values: return r['Total_Joints']
             base = np.ceil(r['Total_Joints'] * (r['RT_Req'] / 100))
             if r['Rej_Count'] >= 1: return int(min(r['Total_Joints'], base + 2))
             return int(base)
 
         audit['Required'] = audit.apply(final_req, axis=1)
-        audit['Deficit'] = (audit['Required'] - audit['RT1_Count']).clip(lower=0)
-        audit['Done_%'] = (audit['RT1_Count'] / audit['Total_Joints'] * 100).round(1)
-        audit['Status'] = np.where((audit['Deficit'] == 0) & (audit['Not_Accepted'] == 0), '🟢 CLOSED', '🔴 OPEN')
+        audit['Deficit'] = (audit['Required'] - audit['RT1_Done']).clip(lower=0)
+        audit['Done_%'] = (audit['RT1_Done'] / audit['Total_Joints'] * 100).round(1)
+        audit['Status'] = np.where((audit['Deficit'] == 0) & (audit['Pending_Repairs'] == 0), '🟢 CLOSED', '🔴 OPEN')
         
         return audit, df_wb
 
@@ -217,7 +223,7 @@ if uploaded_file:
                 if not result.empty:
                     result['Plan_Date'] = datetime.now().strftime('%d/%m/%Y')
                     st.dataframe(result[['Joint_ID', 'Risk_Level', 'Reason', 'Lot_ID', 'Welder1', 'Line', 'MaterialType']], use_container_width=True, hide_index=True)
-                    st.download_button("📥 Download Plan", result.to_csv(sep=';', index=False).encode('utf-8-sig'), f"plan_{selected_sub}.csv")
+                    st.download_button("📥 Download Plan", result.to_csv(sep=';', index=False).encode('utf-8-sig'), f"plan_{selected_sub}.csv", "text/csv")
                 else: st.success("✅ Compliance achieved.")
 
         with tab2:
@@ -244,7 +250,5 @@ if uploaded_file:
                 st.markdown(f"### 🔍 Detailed Explorer: Lot `{lid}`")
                 det_cols = ['Joint_ID', 'Risk_Level', 'Inspection_Type', 'Inspection_Status', 'Line', 'Dateofweld', 'RTDate1', 'RT1rej', 'RTAccepted']
                 st.dataframe(df_with_lots[df_with_lots['Lot_ID'] == lid][det_cols], use_container_width=True, hide_index=True)
-                st.download_button("📥 Download Detail", df_with_lots[df_with_lots['Lot_ID'] == lid].to_csv(sep=';', index=False).encode('utf-8-sig'), f"detail_{lid}.csv")
-else:
-    st.info("💡 Please upload your SQL CSV extraction.")
-    st.table(pd.DataFrame({'Mandatory Column Name': REQUIRED_COLS}))
+                st.download_button("📥 Download Lot Detail", df_with_lots[df_with_lots['Lot_ID'] == lid].to_csv(sep=';', index=False).encode('utf-8-sig'), f"detail_{lid}.csv")
+else: st.info("💡 Please upload your SQL CSV extraction.")
