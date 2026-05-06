@@ -13,7 +13,13 @@ DB_MAP = {
     'RT1rej': 'RT1rej', 'RTAccepted': 'RTAccepted', 'Jointsize': 'Jointsize', 'Thickness': 'Thickness'
 }
 
-# --- LOADERS ---
+REQUIRED_COLS = [
+    'Joint_ID','Subc','Welder1','Line','location','MaterialType',
+    'Process','Dateofweld','RTDate1','RT_Perc',
+    'RT1rej','RTAccepted','Jointsize','Thickness'
+]
+
+# --- LOAD MODEL ---
 @st.cache_resource
 def load_ai_model(path):
     if os.path.exists(path):
@@ -23,29 +29,48 @@ def load_ai_model(path):
             st.warning(f"⚠️ Model load failed: {e}")
     return None
 
+# --- LOAD DATA ---
 @st.cache_data
 def load_and_preprocess(file):
     df = pd.read_csv(file, sep=';', encoding='utf-8-sig')
     df.columns = df.columns.str.strip()
 
-    # Rename dinámico
-    rename_map = {col: DB_MAP[k] for col in df.columns for k in DB_MAP if col.lower() == k.lower()}
+    # Rename tolerante
+    rename_map = {}
+    for col in df.columns:
+        col_clean = col.lower().replace('.', '').replace(' ', '')
+        for k in DB_MAP:
+            k_clean = k.lower().replace('.', '').replace(' ', '')
+            if col_clean == k_clean:
+                rename_map[col] = DB_MAP[k]
     df.rename(columns=rename_map, inplace=True)
 
-    # Columnas obligatorias seguras
-    for col in ['RTDate1', 'RT1rej', 'RTAccepted', 'RT_Perc']:
+    # Crear columnas faltantes
+    for col in REQUIRED_COLS:
         if col not in df.columns:
             df[col] = np.nan
 
-    if 'Joint_ID' not in df.columns:
-        df['Joint_ID'] = range(1, len(df) + 1)
-
-    # Limpieza
-    for col in df.select_dtypes(['object']).columns:
+    # Limpieza de blancos → NaN
+    for col in df.columns:
         df[col] = df[col].astype(str).str.strip()
+        df[col] = df[col].replace({'': np.nan, 'nan': np.nan, 'None': np.nan})
 
+    # Tipos
     df['Dateofweld'] = pd.to_datetime(df['Dateofweld'], dayfirst=True, errors='coerce')
-    df = df.dropna(subset=['Dateofweld'])
+    df['RTDate1'] = pd.to_datetime(df['RTDate1'], dayfirst=True, errors='coerce')
+
+    df = df.dropna(subset=['Dateofweld']).copy()
+
+    # Numéricos
+    for col in ['Jointsize', 'Thickness', 'RT_Perc']:
+        df[col] = pd.to_numeric(df[col], errors='coerce')
+
+    # Booleanos
+    for col in ['RT1rej', 'RTAccepted']:
+        df[col] = (
+            df[col].astype(str).str.upper()
+            .map({'TRUE': True, 'FALSE': False, '1': True, '0': False})
+        ).fillna(False)
 
     return df
 
@@ -53,62 +78,54 @@ def load_and_preprocess(file):
 # --- ENGINE ---
 class RTOptimizerEngine:
 
-    def __init__(self, fallback_rt_perc, window_days, criteria, scope, model):
+    def __init__(self, fallback_rt_perc, window_days, criteria, model):
         self.fallback_rt_perc = fallback_rt_perc
         self.window_days = window_days
         self.criteria = criteria
-        self.scope = scope
         self.model = model
 
     def run_full_process(self, df):
 
-        if not self.criteria:
-            st.error("Select at least one grouping criteria")
-            st.stop()
-
         d = df.copy()
 
-        # --- SAFE CONVERSIONS ---
-        d['RTDate1'] = pd.to_datetime(d['RTDate1'], errors='coerce')
+        # Validar criterios
+        valid_criteria = [c for c in self.criteria if c in d.columns]
+        if not valid_criteria:
+            st.error(f"No valid grouping columns. Available: {list(d.columns)}")
+            st.stop()
 
-        for col in ['Jointsize', 'Thickness']:
-            if col in d.columns:
-                d[col] = pd.to_numeric(d[col].astype(str).str.replace(',', '.'), errors='coerce').fillna(0)
+        self.criteria = valid_criteria
 
-        d['RT_Perc'] = pd.to_numeric(d['RT_Perc'], errors='coerce')
-        d['RT_Perc'] = d['RT_Perc'].replace(0, np.nan).fillna(self.fallback_rt_perc * 100)
+        # RT %
+        d['RT_Perc'] = d['RT_Perc'].replace(0, np.nan)
+        d['RT_Perc'] = d['RT_Perc'].fillna(self.fallback_rt_perc * 100)
 
-        for col in ['RT1rej', 'RTAccepted']:
-            d[col] = d[col].astype(str).str.upper().map({'TRUE': True, 'FALSE': False, '1': True, '0': False}).fillna(False)
-
-        # --- FILTRO ---
-        d = d[d['RT_Perc'] < 100].copy()
-        if d.empty:
-            return pd.DataFrame(), pd.DataFrame()
-
-        # --- IA ---
+        # IA
         if self.model:
             try:
-                X = d[['Jointsize', 'Subc', 'MaterialType', 'Process', 'Thickness']]
+                X = d[['Jointsize', 'Subc', 'MaterialType', 'Process', 'Thickness']].copy()
+                for col in ['Subc','MaterialType','Process']:
+                    X[col] = X[col].fillna("UNKNOWN")
                 d['AI_Prob'] = self.model.predict_proba(X)[:, 1]
             except Exception as e:
-                st.warning(f"Model prediction failed: {e}")
+                st.warning(f"Model failed: {e}")
                 d['AI_Prob'] = 0.0
         else:
             d['AI_Prob'] = 0.0
 
-        # --- RISK LABEL ---
+        # Riesgo
         d['Risk_Level'] = pd.cut(
             d['AI_Prob'],
             bins=[-1, 0.3, 0.75, 1],
             labels=["🟢 Low", "🟡 Medium", "🔴 High"]
         )
 
-        # --- LOT GENERATION ---
+        # --- LOTES ---
         d = d.sort_values(self.criteria + ['Dateofweld'])
 
         def assign_blocks(group):
             group = group.copy()
+
             block = 0
             start = group['Dateofweld'].iloc[0]
             blocks = []
@@ -120,13 +137,21 @@ class RTOptimizerEngine:
                 blocks.append(block)
 
             group['Block_ID'] = blocks
-            group['Lot_ID'] = group[self.criteria].astype(str).agg('_'.join, axis=1) + "_B" + group['Block_ID'].astype(str)
+
+            group['Lot_ID'] = (
+                group[self.criteria]
+                .fillna("NA")
+                .astype(str)
+                .agg('_'.join, axis=1)
+                + "_B"
+                + group['Block_ID'].astype(str)
+            )
 
             return group
 
         d = d.groupby(self.criteria, dropna=False).apply(assign_blocks).reset_index(drop=True)
 
-        # --- PENALTY LOGIC CONSISTENTE ---
+        # --- PENALTY ---
         def label_group(group):
 
             group = group.sort_values(['RTDate1', 'Dateofweld'], na_position='last')
@@ -184,7 +209,6 @@ class RTOptimizerEngine:
             RT_Req=('RT_Perc', 'max')
         ).reset_index()
 
-        # Required basado en lógica real
         def compute_required(lot_id):
             lot = d[d['Lot_ID'] == lot_id]
 
@@ -199,7 +223,7 @@ class RTOptimizerEngine:
 
         return audit, d
 
-    # 🔥 PRIORIDAD: IA → DEFICIT
+    # --- OPTIMIZACIÓN (AI → DEFICIT) ---
     def execute_optimization(self, df, audit):
 
         debts = audit.set_index('Lot_ID')['Deficit'].to_dict()
@@ -207,7 +231,6 @@ class RTOptimizerEngine:
         candidates = df[df['RTDate1'].isna()].copy()
         candidates['Lot_Deficit'] = candidates['Lot_ID'].map(debts).fillna(0)
 
-        # 🔥 TU REGLA
         candidates = candidates.sort_values(
             ['AI_Prob', 'Lot_Deficit'],
             ascending=[False, False]
@@ -243,12 +266,12 @@ if file:
         default=['Subc', 'Welder1']
     )
 
-    engine = RTOptimizerEngine(0.1, 14, criteria, "ALL", model)
+    engine = RTOptimizerEngine(0.1, 14, criteria, model)
 
     audit, df_lots = engine.run_full_process(df)
 
-    if st.button("Generate Plan"):
+    if st.button("Generate Optimized Plan"):
         plan = engine.execute_optimization(df_lots, audit)
 
         st.metric("Selected Joints", len(plan))
-        st.dataframe(plan)
+        st.dataframe(plan, use_container_width=True)
