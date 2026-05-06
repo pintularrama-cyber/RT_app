@@ -251,5 +251,5 @@ if uploaded_file:
                 st.dataframe(df_with_lots[df_with_lots['Lot_ID'] == lid][det_cols], use_container_width=True, hide_index=True)
                 st.download_button("📥 Download Detail", df_with_lots[df_with_lots['Lot_ID'] == lid].to_csv(sep=';', index=False).encode('utf-8-sig'), f"detail_{lid}.csv")
 else:
-    st.info("💡 Please upload your SQL CSV extraction.")
+    st.info("💡 Please upload your CSV extraction.")
     st.table(pd.DataFrame({'Mandatory Column Name': REQUIRED_COLS}))
