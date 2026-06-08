@@ -269,8 +269,27 @@ if uploaded_file:
                 row_idx = event.selection.rows[0]; lid = f_a.iloc[row_idx]['Lot_ID']
                 st.markdown(f"### 🔍 Detailed Explorer: Lot `{lid}`")
                 det_cols = ['Joint_ID', 'Risk_Level', 'Inspection_Type', 'Inspection_Status', 'Line', 'Dateofweld', 'RTDate1', 'RT1rej', 'RTAccepted']
-                st.dataframe(df_with_lots[df_with_lots['Lot_ID'] == lid][det_cols], use_container_width=True, hide_index=True)
+                
+                # 1. Filtramos los datos del lote seleccionado
+                df_detail = df_with_lots[df_with_lots['Lot_ID'] == lid][det_cols].copy()
+                
+                # 2. Definimos la función para pintar las filas basadas en la columna 'Inspection_Type'
+                def highlight_penalty_rows(row):
+                    style = ''
+                    if row['Inspection_Type'] == 'Penalty Tracer':
+                        # Ámbar suave (Amarillo Material Design 100)
+                        style = 'background-color: #FFE082; color: black;'
+                    elif row['Inspection_Type'] == 'Penalty Lot 100%':
+                        # Rojo claro suave (Rojo Material Design 100)
+                        style = 'background-color: #FFCDD2; color: black;'
+                    
+                    # Retornamos el mismo estilo para todas las columnas de la fila actual
+                    return [style] * len(row)
+
+                # 3. Aplicamos el estilo al DataFrame (axis=1 evalúa fila por fila)
+                styled_detail = df_detail.style.apply(highlight_penalty_rows, axis=1)
+                
+                # 4. Renderizamos el objeto estilizado con st.dataframe
+                st.dataframe(styled_detail, use_container_width=True, hide_index=True)
+                
                 st.download_button("📥 Download Detail", df_with_lots[df_with_lots['Lot_ID'] == lid].to_csv(sep=';', index=False).encode('utf-8-sig'), f"detail_{lid}.csv")
-else:
-    st.info("💡 Please upload your CSV extraction.")
-    st.table(pd.DataFrame({'Mandatory Column Name': REQUIRED_COLS}))
