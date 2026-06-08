@@ -308,9 +308,17 @@ if uploaded_file:
 
         with tab2:
             k1, k2, k3, k4, k5 = st.columns(5)
+            
+            # Filtro para calcular la media de Done_% únicamente de los lotes CLOSED
+            closed_lots = audit_df[audit_df['Status'] == '🟢 CLOSED']
+            avg_actual_rt_closed = closed_lots['Done_%'].mean() if not closed_lots.empty else 0.0
+
             k1.metric("Total Lots", len(audit_df)); k2.metric("Open Lots", len(audit_df[audit_df['Status'] == '🔴 OPEN']))
             k3.metric("Project Compliance", f"{(len(audit_df[audit_df['Status'] == '🟢 CLOSED'])/len(audit_df)*100 if len(audit_df)>0 else 0):.1f}%")
-            k4.metric("Avg. Actual RT %", f"{audit_df['Done_%'].mean():.1f}%"); k5.metric("Avg. Target RT %", f"{audit_df['RT_Req'].mean():.1f}%")
+            
+            # KPI K4 actualizado para mostrar solo el promedio de los lotes cerrados
+            k4.metric("Avg. Actual RT %", f"{avg_actual_rt_closed:.1f}%"); k5.metric("Avg. Target RT %", f"{audit_df['RT_Req'].mean():.1f}%")
+            
             st.divider()
             f1, f2, f3, f4 = st.columns(4)
             with f1: sl = st.multiselect("Filter Lot ID", options=sorted(audit_df['Lot_ID'].unique()))
