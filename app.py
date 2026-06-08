@@ -62,7 +62,7 @@ class RTOptimizerEngine:
         self.scope = selected_location_scope
         self.model_pipeline = model
 
-   def get_lot_audit(self, df):
+    def get_lot_audit(self, df):
         d = df.copy()
         d['RTDate1'] = pd.to_datetime(d['RTDate1'], dayfirst=True, errors='coerce')
         
