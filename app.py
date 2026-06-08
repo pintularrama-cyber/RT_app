@@ -62,7 +62,7 @@ class RTOptimizerEngine:
         self.scope = selected_location_scope
         self.model_pipeline = model
 
-    def get_lot_audit(self, df):
+   def get_lot_audit(self, df):
         d = df.copy()
         d['RTDate1'] = pd.to_datetime(d['RTDate1'], dayfirst=True, errors='coerce')
         
@@ -73,6 +73,7 @@ class RTOptimizerEngine:
             
         d['RT_Perc'] = pd.to_numeric(d['RT_Perc'], errors='coerce').replace(0, np.nan).fillna(self.fallback_rt_perc * 100)
         
+        # Mapeo de booleanos: '0', 'FALSE', 'NAN' o vacíos se convierten en False. '1' y 'TRUE' se convierten en True.
         for col in ['RT1rej', 'RTAccepted']:
             d[col] = d[col].astype(str).str.upper().str.strip().map({'TRUE': True, 'FALSE': False, '1': True, '0': False, 'NAN': False}).fillna(False)
 
@@ -116,12 +117,20 @@ class RTOptimizerEngine:
             processed.append(group)
         df_wb = pd.concat(processed).reset_index(drop=True)
 
+        # NUEVO: Identificar soldaduras que fueron rechazadas (RT1rej == True) y no aceptadas (RTAccepted == False)
+        df_wb['Is_Pending_Repair'] = (df_wb['RT1rej'] == True) & (df_wb['RTAccepted'] == False)
+
         # Auditoría y Penalty
         audit = df_wb.groupby('Lot_ID', as_index=False).agg(
-            Total_Joints=('Joint_ID', 'count'), RT1_Count=('RTDate1', 'count'), 
-            Rej_Count=('RT1rej', 'sum'), Not_Accepted=('RTAccepted', lambda x: (x == False).sum()),
-            RT_Req=('RT_Perc', 'max'), Welder1=('Welder1', 'first'), 
-            Subc=('Subc', 'first'), MaterialType=('MaterialType', 'first'), Block_Start=('Dateofweld', 'min')
+            Total_Joints=('Joint_ID', 'count'), 
+            RT1_Count=('RTDate1', 'count'), 
+            Rej_Count=('RT1rej', 'sum'), 
+            Pending_Repairs=('Is_Pending_Repair', 'sum'), # Nueva columna que sustituye a Not_Accepted
+            RT_Req=('RT_Perc', 'max'), 
+            Welder1=('Welder1', 'first'), 
+            Subc=('Subc', 'first'), 
+            MaterialType=('MaterialType', 'first'), 
+            Block_Start=('Dateofweld', 'min')
         )
 
         # Etiquetado cronológico (Puntos 7-12 Checklist)
@@ -162,7 +171,9 @@ class RTOptimizerEngine:
         audit['Required'] = audit.apply(final_req, axis=1)
         audit['Deficit'] = (audit['Required'] - audit['RT1_Count']).clip(lower=0)
         audit['Done_%'] = (audit['RT1_Count'] / audit['Total_Joints'] * 100).round(1)
-        audit['Status'] = np.where((audit['Deficit'] == 0) & (audit['Not_Accepted'] == 0), '🟢 CLOSED', '🔴 OPEN')
+        
+        # El lote se cierra si se cumple el cupo (Deficit == 0) y no quedan reparaciones pendientes (Pending_Repairs == 0)
+        audit['Status'] = np.where((audit['Deficit'] == 0) & (audit['Pending_Repairs'] == 0), '🟢 CLOSED', '🔴 OPEN')
         
         return audit, df_wb
 
