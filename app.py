@@ -143,7 +143,7 @@ class RTOptimizerEngine:
                 current_lot = row['Lot_ID']; found_fail = False; tracers = 0; is_100 = row['Rej_Count'] > 1
             
             if pd.isna(row['RTDate1']): s = "Not Inspected"
-            elif not row['RT1rej']: s = "Standard RT"
+            elif not row['RT1rej']: s = "RT Accepted"
             elif row['RTAccepted']: s = "Rejected & Repaired"
             else: s = "Rejected & Pending to be repaired"
             final_status.append(s)
