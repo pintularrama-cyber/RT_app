@@ -208,28 +208,30 @@ st.title(":material/engineering: RT Optimizer")
 MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'modelo_welding_lgb.joblib')
 loaded_model = load_ai_model(MODEL_PATH)
 
-# Esta es tu línea 214 original:
+
 uploaded_file = st.file_uploader("Upload Daily SQL Extraction", type="csv")
 
-# >>> PEGA ESTE BLOQUE AQUÍ <<<
-if uploaded_file and loaded_model:
-    import time
-    file_key = f"loaded_{uploaded_file.name}_{uploaded_file.size}"
-    if file_key not in st.session_state:
-        with st.sidebar:
-            with st.spinner("Initializing AI Engine..."):
-                time.sleep(3)
-        st.session_state[file_key] = True
 
-if loaded_model: 
-    st.sidebar.success("✅ ML Engine Active")
-    if uploaded_file:
+# >>> REEMPLAZA EL BLOQUE DE LA BARRA LATERAL POR ESTE <<<
+if uploaded_file:
+    # 1. Simulación de delay de 3 segundos (solo la primera vez que se lee este archivo)
+    if loaded_model:
+        import time
+        file_key = f"loaded_{uploaded_file.name}_{uploaded_file.size}"
+        if file_key not in st.session_state:
+            with st.sidebar:
+                with st.spinner("Initializing AI Engine..."):
+                    time.sleep(3)
+            st.session_state[file_key] = True
+
+    # 2. Renderizado del estado y del selector de modelos (SOLO si ya se subió el CSV)
+    if loaded_model: 
+        st.sidebar.success("✅ ML Engine Active")
         selected_model = st.sidebar.selectbox("🤖 Selected AI Model:", options=["General", "Workshop"])
         if selected_model == "Workshop":
             st.sidebar.info("💡 Prototype: Running 'General' engine under the hood.")
-else: 
-    st.sidebar.warning("⚠️ Standard Mode Active")
-# >>> FIN DEL BLOQUE <<<
+    else: 
+        st.sidebar.warning("⚠️ Standard Mode Active")
 
 if uploaded_file:
     df_raw = load_and_preprocess_data(uploaded_file)
