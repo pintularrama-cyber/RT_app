@@ -298,7 +298,21 @@ if uploaded_file:
             event = st.dataframe(f_a, use_container_width=True, on_select="rerun", selection_mode="single-row", hide_index=True)
             if event.selection.rows:
                 row_idx = event.selection.rows[0]; lid = f_a.iloc[row_idx]['Lot_ID']
-                st.markdown(f"### 🔍 Detailed Explorer: Lot `{lid}`")
+                
+                # === NUEVO: Título del Detalle y Botón de Descarga en paralelo (ARRIBA) ===
+                col_det_header, col_det_download = st.columns([3, 1], vertical_alignment="bottom")
+                with col_det_header:
+                    st.markdown(f"### 🔍 Detailed Explorer: Lot `{lid}`")
+                with col_det_download:
+                    st.download_button(
+                        label="📥 Download Detail",
+                        data=df_with_lots[df_with_lots['Lot_ID'] == lid].to_csv(sep=';', index=False).encode('utf-8-sig'),
+                        file_name=f"detail_{lid}.csv",
+                        mime="text/csv",
+                        use_container_width=True
+                    )
+                # ========================================================================
+                
                 det_cols = ['Joint_ID', 'Risk_Level', 'Inspection_Type', 'Inspection_Status', 'Line', 'Dateofweld', 'RTDate1', 'RT1rej', 'RTAccepted']
                 
                 # Filtramos los datos del lote seleccionado
@@ -316,6 +330,5 @@ if uploaded_file:
                 # Aplicamos el estilo al DataFrame
                 styled_detail = df_detail.style.apply(highlight_penalty_rows, axis=1)
                 
-                # Renderizamos el objeto estilizado con st.dataframe
+                # Renderizamos el objeto estilizado con st.dataframe (YA SIN el botón al final)
                 st.dataframe(styled_detail, use_container_width=True, hide_index=True)
-                st.download_button("📥 Download Detail", df_with_lots[df_with_lots['Lot_ID'] == lid].to_csv(sep=';', index=False).encode('utf-8-sig'), f"detail_{lid}.csv")
