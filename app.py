@@ -356,10 +356,13 @@ if uploaded_file:
                     style = 'background-color: #FFE082; color: black;'
                 return [style] * len(row)
 
-            # Aplicar el estilo al DataFrame filtrado
-            styled_f_a = f_a.style.apply(highlight_summary_rows, axis=1)
+            # --- MODIFICADO: Aplicar colores Y formato de porcentaje con 2 decimales ---
+            styled_f_a = f_a.style.apply(highlight_summary_rows, axis=1).format({
+                'Done_%': '{:.2f}%',
+                'RT_Req': '{:.2f}%'
+            })
 
-            # Mostrar la tabla general con los colores aplicados y la interactividad de selección intacta
+            # Mostrar la tabla general con los colores y formatos aplicados
             event = st.dataframe(styled_f_a, use_container_width=True, on_select="rerun", selection_mode="single-row", hide_index=True)
             
             if event.selection.rows:
