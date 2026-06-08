@@ -224,13 +224,31 @@ if uploaded_file:
         return ["ALL"] + available if len(available) > 1 else available
 
     location_scope = st.sidebar.radio("Location Scope:", options=get_scopes(df_raw, selected_sub), index=0)
-    days_per_lot = st.sidebar.number_input("Days per Window", min_value=1, value=14)
-    fallback_perc = st.sidebar.slider("Fallback RT %", 0, 100, 10)
 
+    # 1. HARDCODE: Definimos el Fallback RT % directamente al 10% (0.10) sin el slider anterior
+    fallback_perc_fixed = 0.10
+
+    # Línea divisoria
     st.sidebar.divider()
-    db_criteria = [col for cond, col in zip([st.sidebar.checkbox("Subcontractor (Subc)", value=True), st.sidebar.checkbox("Welder ID (Welder1)", value=True), st.sidebar.checkbox("Material Type", value=True), st.sidebar.checkbox("Welding Process", value=True), st.sidebar.checkbox("Line ID", value=False)], ['Subc', 'Welder1', 'MaterialType', 'WPS.1.Description', 'Line']) if cond]
 
-    engine = RTOptimizerEngine(fallback_perc/100, days_per_lot, db_criteria, location_scope, loaded_model)
+    # 3. TEXTO EXPLICATIVO: Mensaje introductorio para los criterios de los lotes
+    st.sidebar.markdown("### Lot Grouping Options")
+    st.sidebar.write("Please select joint lot creation criteria:")
+
+    # 2. REUBICACIÓN: El selector "Days per Window" ahora se muestra debajo de la línea
+    days_per_lot = st.sidebar.number_input("Days per Window", min_value=1, value=14)
+
+    # Checkboxes de selección de criterios
+    db_criteria = [
+        col for cond, col in zip([
+            st.sidebar.checkbox("Subcontractor (Subc)", value=True), 
+            st.sidebar.checkbox("Welder ID (Welder1)", value=True), 
+            st.sidebar.checkbox("Material Type", value=True), 
+            st.sidebar.checkbox("Welding Process", value=True), 
+            st.sidebar.checkbox("Line ID", value=False)
+        ], ['Subc', 'Welder1', 'MaterialType', 'WPS.1.Description', 'Line']) if cond
+    ]
+    engine = RTOptimizerEngine(fallback_perc_fixed, days_per_lot, db_criteria, location_scope, loaded_model)
     df_input = df_raw.copy() if selected_sub == "ALL" else df_raw[df_raw['Subc'] == selected_sub].copy()
     audit_df, df_with_lots = engine.get_lot_audit(df_input)
 
