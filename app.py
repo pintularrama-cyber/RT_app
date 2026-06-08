@@ -263,7 +263,7 @@ if uploaded_file:
             if sm: f_a = f_a[f_a['MaterialType'].isin(sm)]
             if ss: f_a = f_a[f_a['Status'].isin(ss)]
 
-            st.subheader("All Lots Summary Log")
+            st.subheader("Lots Summary Log")
             event = st.dataframe(f_a, use_container_width=True, on_select="rerun", selection_mode="single-row", hide_index=True)
             if event.selection.rows:
                 row_idx = event.selection.rows[0]; lid = f_a.iloc[row_idx]['Lot_ID']
