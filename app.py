@@ -325,13 +325,14 @@ if uploaded_file:
             with f2: sw = st.multiselect("Filter Welder", options=sorted(audit_df['Welder1'].unique()))
             with f3: sm = st.multiselect("Filter Material", options=sorted(audit_df['MaterialType'].unique()))
             with f4: ss = st.multiselect("Filter Status", options=['🔴 OPEN', '🟢 CLOSED'])
+
             f_a = audit_df.copy()
             if sl: f_a = f_a[f_a['Lot_ID'].isin(sl)]
             if sw: f_a = f_a[f_a['Welder1'].isin(sw)]
             if sm: f_a = f_a[f_a['MaterialType'].isin(sm)]
             if ss: f_a = f_a[f_a['Status'].isin(ss)]
 
-            # === NUEVO: Subtítulo y Botón de Descarga alineados en paralelo ===
+            # --- NUEVO: Título y Botón de Descarga en paralelo (Summary) ---
             col_header, col_download = st.columns([3, 1], vertical_alignment="bottom")
             with col_header:
                 st.subheader("All Lots Summary Log")
@@ -343,13 +344,28 @@ if uploaded_file:
                     mime="text/csv",
                     use_container_width=True
                 )
-            # =================================================================
 
-            event = st.dataframe(f_a, use_container_width=True, on_select="rerun", selection_mode="single-row", hide_index=True)
+            # --- NUEVO: Definir función para colorear las filas de la tabla de resumen ---
+            def highlight_summary_rows(row):
+                style = ''
+                # Prioridad 1: Si hay penalización del 100% (Rojo Claro)
+                if row['100% Penalty'] == 'Yes':
+                    style = 'background-color: #FFCDD2; color: black;'
+                # Prioridad 2: Si hay Penalty Tracer (Ámbar)
+                elif row['Penalty Tracer'] == 'Yes':
+                    style = 'background-color: #FFE082; color: black;'
+                return [style] * len(row)
+
+            # Aplicar el estilo al DataFrame filtrado
+            styled_f_a = f_a.style.apply(highlight_summary_rows, axis=1)
+
+            # Mostrar la tabla general con los colores aplicados y la interactividad de selección intacta
+            event = st.dataframe(styled_f_a, use_container_width=True, on_select="rerun", selection_mode="single-row", hide_index=True)
+            
             if event.selection.rows:
                 row_idx = event.selection.rows[0]; lid = f_a.iloc[row_idx]['Lot_ID']
                 
-                # === NUEVO: Título del Detalle y Botón de Descarga en paralelo (ARRIBA) ===
+                # Título del Detalle y Botón de Descarga en paralelo (ARRIBA)
                 col_det_header, col_det_download = st.columns([3, 1], vertical_alignment="bottom")
                 with col_det_header:
                     st.markdown(f"### 🔍 Detailed Explorer: Lot `{lid}`")
@@ -361,14 +377,11 @@ if uploaded_file:
                         mime="text/csv",
                         use_container_width=True
                     )
-                # ========================================================================
                 
                 det_cols = ['Joint_ID', 'Risk_Level', 'Inspection_Type', 'Inspection_Status', 'Line', 'Dateofweld', 'RTDate1', 'RT1rej', 'RTAccepted']
-                
-                # Filtramos los datos del lote seleccionado
                 df_detail = df_with_lots[df_with_lots['Lot_ID'] == lid][det_cols].copy()
                 
-                # Definimos la función para pintar las filas basadas en la columna 'Inspection_Type'
+                # Función para pintar las filas de la tabla de detalles
                 def highlight_penalty_rows(row):
                     style = ''
                     if row['Inspection_Type'] == 'Penalty Tracer':
@@ -377,8 +390,5 @@ if uploaded_file:
                         style = 'background-color: #FFCDD2; color: black;'
                     return [style] * len(row)
 
-                # Aplicamos el estilo al DataFrame
                 styled_detail = df_detail.style.apply(highlight_penalty_rows, axis=1)
-                
-                # Renderizamos el objeto estilizado con st.dataframe (YA SIN el botón al final)
                 st.dataframe(styled_detail, use_container_width=True, hide_index=True)
