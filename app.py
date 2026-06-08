@@ -221,7 +221,7 @@ if uploaded_file:
         if file_key not in st.session_state:
             with st.sidebar:
                 with st.spinner("Initializing AI Engine..."):
-                    time.sleep(3)
+                    time.sleep(10)
             st.session_state[file_key] = True
 
     # 2. Renderizado del estado y del selector de modelos (SOLO si ya se subió el CSV)
