@@ -222,7 +222,7 @@ if uploaded_file and loaded_model:
         st.session_state[file_key] = True
 
 if loaded_model: 
-    st.sidebar.success("✅ AI Engine Active (LGBM)")
+    st.sidebar.success("✅ ML Engine Active")
     if uploaded_file:
         selected_model = st.sidebar.selectbox("🤖 Selected AI Model:", options=["General", "Workshop"])
         if selected_model == "Workshop":
