@@ -6,6 +6,7 @@ import os
 import sklearn.compose
 import sklearn.impute
 from datetime import datetime
+import time
 
 # --- 1. PARCHES DE COMPATIBILIDAD IA ---
 if not hasattr(sklearn.compose._column_transformer, '_RemainderColsList'):
@@ -207,10 +208,28 @@ st.title(":material/engineering: RT Optimizer")
 MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'modelo_welding_lgb.joblib')
 loaded_model = load_ai_model(MODEL_PATH)
 
-if loaded_model: st.sidebar.success("✅ AI Engine Active (LGBM)")
-else: st.sidebar.warning("⚠️ Standard Mode Active")
-
+# Esta es tu línea 214 original:
 uploaded_file = st.file_uploader("Upload Daily SQL Extraction", type="csv")
+
+# >>> PEGA ESTE BLOQUE AQUÍ <<<
+if uploaded_file and loaded_model:
+    import time
+    file_key = f"loaded_{uploaded_file.name}_{uploaded_file.size}"
+    if file_key not in st.session_state:
+        with st.sidebar:
+            with st.spinner("Initializing AI Engine..."):
+                time.sleep(3)
+        st.session_state[file_key] = True
+
+if loaded_model: 
+    st.sidebar.success("✅ AI Engine Active (LGBM)")
+    if uploaded_file:
+        selected_model = st.sidebar.selectbox("🤖 Selected AI Model:", options=["General", "Workshop"])
+        if selected_model == "Workshop":
+            st.sidebar.info("💡 Prototype: Running 'General' engine under the hood.")
+else: 
+    st.sidebar.warning("⚠️ Standard Mode Active")
+# >>> FIN DEL BLOQUE <<<
 
 if uploaded_file:
     df_raw = load_and_preprocess_data(uploaded_file)
