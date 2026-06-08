@@ -73,7 +73,6 @@ class RTOptimizerEngine:
             
         d['RT_Perc'] = pd.to_numeric(d['RT_Perc'], errors='coerce').replace(0, np.nan).fillna(self.fallback_rt_perc * 100)
         
-        # Mapeo de booleanos: '0', 'FALSE', 'NAN' o vacíos se convierten en False. '1' y 'TRUE' se convierten en True.
         for col in ['RT1rej', 'RTAccepted']:
             d[col] = d[col].astype(str).str.upper().str.strip().map({'TRUE': True, 'FALSE': False, '1': True, '0': False, 'NAN': False}).fillna(False)
 
@@ -85,7 +84,7 @@ class RTOptimizerEngine:
         
         if df_filtered.empty: return pd.DataFrame(), pd.DataFrame()
 
-        # IA Inferencia (Uso de nombres originales exactos)
+        # IA Inferencia
         if self.model_pipeline:
             try:
                 X_feats = ['Jointsize', 'Subc', 'MaterialType', 'WPS.1.Description', 'Thickness']
@@ -111,21 +110,20 @@ class RTOptimizerEngine:
                     current_block += 1
                 b_ids.append(current_block)
             group['Block_ID'] = b_ids
-            # Crear ID
             prefix = "_".join([str(group[c].iloc[0]) for c in self.lot_criteria])
             group['Lot_ID'] = group['Block_ID'].astype(str) + "_" + prefix
             processed.append(group)
         df_wb = pd.concat(processed).reset_index(drop=True)
 
-        # NUEVO: Identificar soldaduras que fueron rechazadas (RT1rej == True) y no aceptadas (RTAccepted == False)
+        # Identificar juntas rechazadas y no aceptadas (pendientes de reparación)
         df_wb['Is_Pending_Repair'] = (df_wb['RT1rej'] == True) & (df_wb['RTAccepted'] == False)
 
-        # Auditoría y Penalty
+        # Auditoría Base
         audit = df_wb.groupby('Lot_ID', as_index=False).agg(
             Total_Joints=('Joint_ID', 'count'), 
             RT1_Count=('RTDate1', 'count'), 
             Rej_Count=('RT1rej', 'sum'), 
-            Pending_Repairs=('Is_Pending_Repair', 'sum'), # Nueva columna que sustituye a Not_Accepted
+            Pending_Repairs=('Is_Pending_Repair', 'sum'),
             RT_Req=('RT_Perc', 'max'), 
             Welder1=('Welder1', 'first'), 
             Subc=('Subc', 'first'), 
@@ -133,7 +131,7 @@ class RTOptimizerEngine:
             Block_Start=('Dateofweld', 'min')
         )
 
-        # Etiquetado cronológico (Puntos 7-12 Checklist)
+        # Etiquetado cronológico (Penalizaciones)
         df_wb = df_wb.merge(audit[['Lot_ID', 'Rej_Count']], on='Lot_ID', how='left')
         
         final_types = []; final_status = []
@@ -161,6 +159,17 @@ class RTOptimizerEngine:
         df_wb['Inspection_Type'] = final_types
         df_wb['Inspection_Status'] = final_status
 
+        # === NUEVO: CÁLCULO DE LAS COLUMNAS DE PENALIZACIÓN DEL LOTE ===
+        # Agrupamos df_wb para comprobar si se asignó "Penalty Tracer" o "Penalty Lot 100%" a alguna junta del lote
+        penalties_summary = df_wb.groupby('Lot_ID').agg(
+            has_tracer=('Inspection_Type', lambda x: 'Penalty Tracer' in x.values),
+            has_100=('Inspection_Type', lambda x: 'Penalty Lot 100%' in x.values)
+        ).reset_index()
+
+        penalties_summary['Penalty Tracer'] = np.where(penalties_summary['has_tracer'], 'Yes', 'No')
+        penalties_summary['100% Penalty'] = np.where(penalties_summary['has_100'], 'Yes', 'No')
+        # ==============================================================
+
         def final_req(r):
             lot_data = df_wb[df_wb['Lot_ID'] == r['Lot_ID']]
             if "Penalty Lot 100%" in lot_data['Inspection_Type'].values: return r['Total_Joints']
@@ -171,10 +180,11 @@ class RTOptimizerEngine:
         audit['Required'] = audit.apply(final_req, axis=1)
         audit['Deficit'] = (audit['Required'] - audit['RT1_Count']).clip(lower=0)
         audit['Done_%'] = (audit['RT1_Count'] / audit['Total_Joints'] * 100).round(1)
-        
-        # El lote se cierra si se cumple el cupo (Deficit == 0) y no quedan reparaciones pendientes (Pending_Repairs == 0)
         audit['Status'] = np.where((audit['Deficit'] == 0) & (audit['Pending_Repairs'] == 0), '🟢 CLOSED', '🔴 OPEN')
         
+        # NUEVO: Combinamos las nuevas columnas con la tabla principal de auditoría (audit)
+        audit = audit.merge(penalties_summary[['Lot_ID', 'Penalty Tracer', '100% Penalty']], on='Lot_ID', how='left')
+
         return audit, df_wb
 
     def execute_optimization(self, df_wb, audit):
