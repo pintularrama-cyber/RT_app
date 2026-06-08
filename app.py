@@ -281,33 +281,41 @@ if uploaded_file:
             if sm: f_a = f_a[f_a['MaterialType'].isin(sm)]
             if ss: f_a = f_a[f_a['Status'].isin(ss)]
 
-            st.subheader("Lots Summary Log")
+            # === NUEVO: Subtítulo y Botón de Descarga alineados en paralelo ===
+            col_header, col_download = st.columns([3, 1], vertical_alignment="bottom")
+            with col_header:
+                st.subheader("All Lots Summary Log")
+            with col_download:
+                st.download_button(
+                    label="📥 Download Lots Summary Log",
+                    data=f_a.to_csv(sep=';', index=False).encode('utf-8-sig'),
+                    file_name=f"lots_summary_{selected_sub}.csv",
+                    mime="text/csv",
+                    use_container_width=True
+                )
+            # =================================================================
+
             event = st.dataframe(f_a, use_container_width=True, on_select="rerun", selection_mode="single-row", hide_index=True)
             if event.selection.rows:
                 row_idx = event.selection.rows[0]; lid = f_a.iloc[row_idx]['Lot_ID']
                 st.markdown(f"### 🔍 Detailed Explorer: Lot `{lid}`")
                 det_cols = ['Joint_ID', 'Risk_Level', 'Inspection_Type', 'Inspection_Status', 'Line', 'Dateofweld', 'RTDate1', 'RT1rej', 'RTAccepted']
                 
-                # 1. Filtramos los datos del lote seleccionado
+                # Filtramos los datos del lote seleccionado
                 df_detail = df_with_lots[df_with_lots['Lot_ID'] == lid][det_cols].copy()
                 
-                # 2. Definimos la función para pintar las filas basadas en la columna 'Inspection_Type'
+                # Definimos la función para pintar las filas basadas en la columna 'Inspection_Type'
                 def highlight_penalty_rows(row):
                     style = ''
                     if row['Inspection_Type'] == 'Penalty Tracer':
-                        # Ámbar suave (Amarillo Material Design 100)
                         style = 'background-color: #FFE082; color: black;'
                     elif row['Inspection_Type'] == 'Penalty Lot 100%':
-                        # Rojo claro suave (Rojo Material Design 100)
                         style = 'background-color: #FFCDD2; color: black;'
-                    
-                    # Retornamos el mismo estilo para todas las columnas de la fila actual
                     return [style] * len(row)
 
-                # 3. Aplicamos el estilo al DataFrame (axis=1 evalúa fila por fila)
+                # Aplicamos el estilo al DataFrame
                 styled_detail = df_detail.style.apply(highlight_penalty_rows, axis=1)
                 
-                # 4. Renderizamos el objeto estilizado con st.dataframe
+                # Renderizamos el objeto estilizado con st.dataframe
                 st.dataframe(styled_detail, use_container_width=True, hide_index=True)
-                
                 st.download_button("📥 Download Detail", df_with_lots[df_with_lots['Lot_ID'] == lid].to_csv(sep=';', index=False).encode('utf-8-sig'), f"detail_{lid}.csv")
