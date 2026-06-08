@@ -209,10 +209,31 @@ MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'modelo_we
 loaded_model = load_ai_model(MODEL_PATH)
 
 
-uploaded_file = st.file_uploader("Upload Daily SQL Extraction", type="csv")
+# Título general para las dos opciones de entrada de datos
+st.write("**Select Data Source / Extraction Method:**")
+
+# Creamos 3 columnas: una para el cargador, otra estrecha para el "OR", y otra para la base de datos
+col_upload, col_or, col_db = st.columns([10, 2, 8], vertical_alignment="center")
+
+with col_upload:
+    # Ocultamos el label nativo para que el widget quede alineado perfectamente con el botón de la derecha
+    uploaded_file = st.file_uploader(
+        "Upload Daily SQL Extraction", 
+        type="csv", 
+        label_visibility="collapsed"
+    )
+
+with col_or:
+    # Texto "OR" estilizado y centrado
+    st.markdown("<div style='text-align: center; font-weight: bold; color: gray; font-size: 1.1rem;'>OR</div>", unsafe_allow_html=True)
+
+with col_db:
+    # Botón de conexión a la base de datos (con comportamiento controlado por Toast)
+    connect_clicked = st.button("🔌 Connect with PCA Database", use_container_width=True)
+    if connect_clicked:
+        st.toast("⚡ Connection feature coming soon! Please use CSV upload for now.", icon="🔌")
 
 
-# >>> REEMPLAZA EL BLOQUE DE LA BARRA LATERAL POR ESTE <<<
 if uploaded_file:
     # 1. Simulación de delay de 3 segundos (solo la primera vez que se lee este archivo)
     if loaded_model:
